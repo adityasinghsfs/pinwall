@@ -453,19 +453,32 @@ echo "==> Opening Pinterest. Log in, then press Enter back here."
 python3 harvest_feed.py
 
 # ---------------------------------------------------------------------------
-# 6. Final manual step
+# 6. Final manual step (macOS won't let a script set the screensaver itself,
+#    so we copy the URL to the clipboard to make the paste trivial)
 # ---------------------------------------------------------------------------
+SS_URL="file://$DIR/pinwall.html?speed=24&fade=600&delay=600"
+printf "%s" "$SS_URL" | pbcopy 2>/dev/null && COPIED=1 || COPIED=0
+
 cat << DONE
 
 ==================  ALMOST DONE  ==================
-Last step (System Settings does this part, not a script):
+DONE
+
+if [ "$COPIED" = "1" ]; then
+  echo "Your screensaver URL is already on your clipboard. Just paste it:"
+else
+  echo "Couldn't copy automatically — copy this URL:"
+fi
+
+cat << DONE
+
+       $SS_URL
+
+Last step (System Settings does this part — macOS won't let a script do it):
 
   1. System Settings > Wallpaper > scroll down > Screen Saver
   2. Pick "WebViewScreenSaver"
-  3. Click Options > Add URL > paste exactly:
-
-       file://$DIR/pinwall.html?speed=24&fade=600&delay=600
-
+  3. Click Options > Add URL > paste (Cmd+V)
   4. Set Seconds to -1, click Close.
 
 Tips:
