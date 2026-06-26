@@ -453,6 +453,36 @@ echo "==> Opening Pinterest. Log in, then press Enter back here."
 python3 harvest_feed.py
 
 # ---------------------------------------------------------------------------
+# 5b. Schedule the self-refresh (every 6h, while the Mac is awake)
+# ---------------------------------------------------------------------------
+echo "==> Scheduling auto-refresh every 6 hours..."
+PLIST="$HOME/Library/LaunchAgents/com.aditya.pinwall.plist"
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$PLIST" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.aditya.pinwall</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(which python3)</string>
+    <string>$DIR/harvest_feed.py</string>
+    <string>--headless</string>
+  </array>
+  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>$DIR/refresh.log</string>
+  <key>StandardErrorPath</key><string>$DIR/refresh.log</string>
+</dict>
+</plist>
+PLISTEOF
+launchctl unload "$PLIST" 2>/dev/null
+launchctl load -w "$PLIST" && echo "    scheduled (every 6h). Change StartInterval in $PLIST to adjust."
+
+
+# ---------------------------------------------------------------------------
 # 6. Final manual step (macOS won't let a script set the screensaver itself,
 #    so we copy the URL to the clipboard to make the paste trivial)
 # ---------------------------------------------------------------------------
