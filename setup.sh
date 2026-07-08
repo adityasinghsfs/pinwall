@@ -332,7 +332,7 @@ HTMLEOF
 # ---------------------------------------------------------------------------
 cat > harvest_feed.py << 'PYEOF2'
 #!/usr/bin/env python3
-import os, re, sys, time, json
+import os, re, sys, time, json, random
 from playwright.sync_api import sync_playwright
 
 PINS_FILE = "pins.js"        # writes here — pinwall.html reads it
@@ -361,6 +361,13 @@ def logged_out(page):
 
 def main():
     headless = "--headless" in sys.argv
+    # Jitter scheduled runs so fetches never land on a clock boundary.
+    # launchd fires hourly; a random 0-20min delay makes real fetches
+    # 40-80min apart (avg 1h), which reads far less like a bot to Pinterest.
+    if headless and "--now" not in sys.argv:
+        delay = random.uniform(0, 1200)
+        print(f"Jitter: sleeping {delay/60:.1f} min before fetch...")
+        time.sleep(delay)
     seen, pairs = set(), []
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(USER_DATA, headless=headless,
@@ -453,9 +460,9 @@ echo "==> Opening Pinterest. Log in, then press Enter back here."
 python3 harvest_feed.py
 
 # ---------------------------------------------------------------------------
-# 5b. Schedule the self-refresh (every 6h, while the Mac is awake)
+# 5b. Schedule the self-refresh (~hourly + random jitter, while awake)
 # ---------------------------------------------------------------------------
-echo "==> Scheduling auto-refresh every 6 hours..."
+echo "==> Scheduling auto-refresh (~hourly, jittered)..."
 PLIST="$HOME/Library/LaunchAgents/com.aditya.pinwall.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" << PLISTEOF
@@ -471,7 +478,7 @@ cat > "$PLIST" << PLISTEOF
     <string>--headless</string>
   </array>
   <key>WorkingDirectory</key><string>$DIR</string>
-  <key>StartInterval</key><integer>21600</integer>
+  <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><false/>
   <key>StandardOutPath</key><string>$DIR/refresh.log</string>
   <key>StandardErrorPath</key><string>$DIR/refresh.log</string>
@@ -479,7 +486,7 @@ cat > "$PLIST" << PLISTEOF
 </plist>
 PLISTEOF
 launchctl unload "$PLIST" 2>/dev/null
-launchctl load -w "$PLIST" && echo "    scheduled (every 6h). Change StartInterval in $PLIST to adjust."
+launchctl load -w "$PLIST" && echo "    scheduled (~hourly + jitter). Change StartInterval in $PLIST to adjust."
 
 
 # ---------------------------------------------------------------------------
