@@ -23,6 +23,30 @@ Then:
 Done. Flick your mouse into a hot corner (System Settings → Screen Saver → Hot
 Corners) to trigger it, or just wait.
 
+## Missed a pin? Gallery mode
+
+The screensaver drifts past whether you're looking or not. To go back:
+
+```bash
+open ~/pinwall/gallery.html
+```
+
+Same wall, in a browser, driveable by hand:
+
+- **Scroll or drag** to move — either direction, and it loops forever.
+- **Click any pin** to open it on Pinterest.
+- **↑ / ↓** step, **PageUp / PageDown** jump a screen.
+- **Space** toggles the auto-scroll, **L** snaps back to the live position.
+
+It opens on the *exact* wall the screensaver is showing at that moment — the
+layout is a deterministic shuffle and the scroll is clock-anchored — so scrolling
+up shows you what just went past.
+
+> Use `gallery.html`, not `pinwall.html?gallery=1`. macOS `open` resolves a
+> `file://` URL to a filesystem path and silently drops the `?query`, so you'd
+> land in screensaver mode with no cursor and no clickable pins. `gallery.html`
+> is a one-line redirect, and an in-browser navigation keeps the query.
+
 ## Tweak it
 
 - **Speed:** the `?speed=18` at the end of the URL. Lower = slower. Change it
@@ -44,7 +68,8 @@ Want it automatic? Run `python3 harvest_feed.py --headless` on a schedule via
 
 - The visual is a single `pinwall.html` — a masonry wall with a seamless
   per-column scroll loop. It shuffles once per feed and remembers your scroll
-  position between launches.
+  position between launches. The same file runs gallery mode behind `?gallery=1`,
+  where the scroll clock becomes virtual so you can drive it by hand.
 - The feed isn't available through Pinterest's RSS or public API, so
   `harvest_feed.py` drives a logged-in browser (Playwright), scrolls your home
   feed, and bakes the image URLs into the page.

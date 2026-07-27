@@ -19,7 +19,7 @@ echo ""
 echo "==> Setting up PinWall in $DIR"
 
 # ---------------------------------------------------------------------------
-# 1. Write the screensaver page
+# 1. Write the screensaver page (+ gallery.html, a shortcut into gallery mode)
 # ---------------------------------------------------------------------------
 cat > pinwall.html << 'HTMLEOF'
 <!DOCTYPE html>
@@ -69,7 +69,7 @@ cat > pinwall.html << 'HTMLEOF'
 </head>
 <body>
 <div id="viewport"></div>
-<div id="ghint">Gallery — hover to pause, click a pin to open it on Pinterest</div>
+<div id="ghint">Gallery — scroll or drag to move, click a pin to open it on Pinterest</div>
 
 <div id="tuner">
   <h4>PinWall tuner</h4>
@@ -236,12 +236,17 @@ function boot(PINS) {
   function scheduleRemeasure() { clearTimeout(remeasureTimer); remeasureTimer = setTimeout(remeasure, 120); }
 
   // scroll: real clock in the screensaver (resumes across launches);
-  // pausable virtual clock in gallery mode (so you can hover & click)
-  let vt = 0, lastTs = null, paused = false;
+  // in gallery mode a virtual clock you can drive by hand. It starts at the real
+  // clock, so the gallery opens on exactly the wall the screensaver is showing
+  // right now -- scroll up and you're looking at pins that just went past.
+  let vt = gallery ? Date.now() / 1000 : 0;
+  let lastTs = null, paused = false, autoScroll = false;
+  // offset is vt * speed, so moving the wall dy pixels is dy/speed seconds
+  function nudge(dy) { if (speed) vt += dy / speed; }
   function tick(now) {
     if (gallery) {
       if (lastTs == null) lastTs = now;
-      if (!paused) vt += (now - lastTs) / 1000;
+      if (autoScroll && !paused) vt += (now - lastTs) / 1000;
       lastTs = now;
     }
     const t = gallery ? vt : (Date.now() / 1000);
@@ -251,11 +256,64 @@ function boot(PINS) {
     requestAnimationFrame(tick);
   }
 
-  // gallery interactions: hover pauses, click opens the pin
+  // gallery interactions: scroll/drag the wall by hand, click opens the pin
   if (gallery) {
+    const hint = document.getElementById('ghint');
+    const BASE_HINT = 'Scroll or drag to move · click a pin to open it on Pinterest · Space = auto-scroll · L = live position';
+    let hintTimer = null;
+    hint.textContent = BASE_HINT;
+    function flashHint(msg) {
+      hint.textContent = msg;
+      clearTimeout(hintTimer);
+      hintTimer = setTimeout(() => { hint.textContent = BASE_HINT; }, 1800);
+    }
+    function setAuto(on) { autoScroll = on; flashHint(on ? 'Auto-scroll on' : 'Auto-scroll off'); }
+
+    // hover stops the drift so you can aim at a tile
     viewport.addEventListener('mouseover', e => { if (e.target.closest('img')) paused = true; });
     viewport.addEventListener('mouseout',  e => { if (e.target.closest('img')) paused = false; });
+
+    // wheel / trackpad: move the wall either direction. Takes over from the drift.
+    viewport.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (autoScroll) setAuto(false);
+      nudge(e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1));
+    }, { passive: false });
+
+    // drag to pan; a real drag swallows the click so it doesn't open a pin
+    let dragging = false, dragY = 0, moved = 0;
+    viewport.addEventListener('mousedown', e => {
+      dragging = true; dragY = e.clientY; moved = 0; e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const dy = e.clientY - dragY; dragY = e.clientY;
+      moved += Math.abs(dy);
+      if (moved > 4 && autoScroll) setAuto(false);
+      nudge(-dy);
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    // keys: arrows / page step, space toggles the drift, L jumps to the live wall
+    window.addEventListener('keydown', e => {
+      const page = window.innerHeight * 0.9;
+      if      (e.key === 'ArrowUp')   nudge(-140);
+      else if (e.key === 'ArrowDown') nudge(140);
+      else if (e.key === 'PageUp')    nudge(-page);
+      else if (e.key === 'PageDown')  nudge(page);
+      else if (e.key === ' ')         { setAuto(!autoScroll); e.preventDefault(); return; }
+      else if (e.key === 'l' || e.key === 'L') {
+        vt = Date.now() / 1000; flashHint('Jumped to the live screensaver position');
+        e.preventDefault(); return;
+      }
+      else return;
+      e.preventDefault();
+      if (autoScroll) setAuto(false);
+    });
+
+    // click opens the pin on Pinterest
     viewport.addEventListener('click', e => {
+      if (moved > 4) { moved = 0; return; }
       const img = e.target.closest('img'); if (!img) return;
       const url = img.dataset.link || img.src;
       if (url) window.open(url, '_blank');
@@ -326,6 +384,29 @@ function boot(PINS) {
 </body>
 </html>
 HTMLEOF
+
+cat > gallery.html << 'GALLERYEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PinWall gallery</title>
+<style>html, body { margin: 0; height: 100%; background: #000; }</style>
+</head>
+<body>
+<!--
+  Shortcut into gallery mode. Exists because macOS `open` (and `osascript
+  -e 'open location'`) resolve a file:// URL through LaunchServices to a plain
+  filesystem path, which silently drops "?gallery=1" -- so you'd land in
+  screensaver mode with no cursor and no clickable pins. Redirecting from here
+  is an in-browser navigation, where the query string survives.
+
+  So: `open ~/pinwall/gallery.html` works, in whatever your default browser is.
+-->
+<script>location.replace('pinwall.html?gallery=1');</script>
+</body>
+</html>
+GALLERYEOF
 
 # ---------------------------------------------------------------------------
 # 2. Write the feed harvester (writes pins.js, which pinwall.html reads)
@@ -520,7 +601,12 @@ Last step (System Settings does this part — macOS won't let a script do it):
 
 Tips:
   - Press T while pinwall.html is open in a browser for a live tuner.
-  - Open pinwall.html?gallery=1 in a browser to click pins through to Pinterest.
+  - Missed a pin? Run:  open $DIR/gallery.html
+    That's gallery mode: scroll or drag back through the wall and click any pin
+    to open it on Pinterest. It starts on the exact wall the screensaver is
+    showing right now, so scrolling up shows what just went past.
+    (Use gallery.html, not "pinwall.html?gallery=1" -- macOS \`open\` strips the
+     ?query off a file:// URL and you'd land in screensaver mode instead.)
 
 (If the Options button seems dead, close & reopen System Settings.)
 ==================================================
