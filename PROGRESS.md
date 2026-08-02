@@ -9,8 +9,11 @@ Black background, slow scroll, blooms in from the bottom, never restarts from th
 
 - **pinwall.html** — the screensaver itself. Masonry columns, clock-anchored
   scroll, deterministic shuffle per feed, bottom-to-top fade-in on start, a hidden
-  live tuner (press `T`), reloads itself every 60 min for fresh pins. Also holds
-  gallery mode (`?gallery=1`) — same wall, hand-driveable, clickable.
+  live tuner (press `T`), re-checks the feed every 60 min and only reloads if the
+  pins actually changed. Also holds gallery mode (`?gallery=1`) — same wall,
+  hand-driveable, clickable.
+- **pinwall-watchdog.sh** — kills the WebViewScreenSaver host process when it
+  outlives the screensaver (see battery notes).
 - **gallery.html** — a one-line redirect to `pinwall.html?gallery=1`. Exists only
   because macOS `open` eats the query string (see dead ends).
 - **pins.js** — just my pin URLs (`window.PINS = [...]`). Written by the harvester,
@@ -114,6 +117,44 @@ Click **Done**, then System Settings -> Privacy & Security -> **Open Anyway**.
 - Repo: github.com/adityasinghsfs/pinwall
 - **Never commit `~/.pinwall-session` or `pins.js`** -- that's my login and my feed.
   They live outside the repo; the repo only holds `setup.sh`, `README.md`, `PROGRESS.md`.
+
+## Battery: what was wrong (2026-08-03)
+
+Traced hard battery drain back to this project. Measured, not guessed:
+
+1. **The screensaver host never exited.** `legacyScreenSaver` hosting
+   WebViewScreenSaver had been up **15 days**, burning ~7% of a CPU core with
+   nothing on screen -- macOS rated it the highest-power process on the Mac,
+   above Chrome. Cause: `tick()` ended in an unconditional
+   `requestAnimationFrame`, with start logic and no stop logic. The screensaver
+   wasn't even the selected one any more; the host just never died.
+   Fix: `startLoop`/`stopLoop` + `visibilitychange`/`pagehide`, and
+   `pinwall-watchdog.sh` as the backstop for when the host lingers anyway.
+2. **60fps for 0.4px/frame.** Capped to 30fps; identical to look at, half the
+   compositing. Also skip the transform write when the wall hasn't moved 0.5px.
+3. **`will-change: transform` was static CSS** -- a permanent full-height GPU
+   layer per column. Now applied by `startLoop` and dropped by `stopLoop`.
+4. **The hourly reload was unconditional** -- re-fetched and re-decoded all 200
+   images once an hour whether or not the harvester wrote anything. Now it
+   re-reads `pins.js` via a `<script>` tag (fetch is CORS-blocked over `file://`)
+   and only reloads when the signature changed.
+5. **Three Pinterest scrapers were installed, not one.** The old
+   `com.user.pinterestscreensaver` build left behind two fetchers (one every 30
+   min) plus a `KeepAlive` `nowplaying` daemon polling Spotify *and* Music via
+   `osascript` every ~3s -- ~58k process spawns a day, failing every single time
+   with a `-1700` error, for 18 days straight. `setup.sh` now uninstalls them.
+6. **launchd runs missed `StartInterval` jobs the instant the Mac wakes**, so a
+   5-second dark wake with the lid shut became a multi-minute Chromium scrape.
+   `harvest_feed.py` now bails when `pmset -g ps` says Battery Power.
+
+Left deliberately undone: lazy-loading the duplicated half of the wall. The
+seamless loop measures `scrollHeight / 2`, so images that haven't loaded report
+height 0 and the loop length goes wrong. The duplicate half is cache/decode
+shared anyway, so the win wouldn't justify the breakage.
+
+Not this project, but found while measuring and worth knowing: BambuStudio
+times out the full 30s on *every* sleep notification (971 times in the log), and
+Power Nap + TCP keepalive on battery is what permits the ~2100 dark wakes.
 
 ## Maybe later
 

@@ -34,7 +34,9 @@ cat > pinwall.html << 'HTMLEOF'
   body.tuning, body.gallery { cursor: auto; }
   #viewport { position: fixed; inset: 0; display: flex; gap: var(--gap);
     padding: var(--gap); box-sizing: border-box; background: #000; }
-  .col { flex: 1; position: relative; will-change: transform; }
+  /* no static will-change: it pins a full-height GPU layer per column for the
+     life of the page. The loop sets it while animating and drops it on pause. */
+  .col { flex: 1; position: relative; }
   .col img { width: 100%; display: block; margin-bottom: var(--gap);
     border-radius: 12px; background: #0b0b0b; -webkit-user-select: none; user-select: none;
     opacity: 0; transform: translateY(var(--rise));
@@ -190,6 +192,7 @@ function boot(PINS) {
       columns.push({ el: col, loopHeight: 0, phase: ci * 173 });
     });
     remeasure();
+    if (running) setPromoted(true);   // columns are new objects; re-promote them
     if (firstBuild) { firstBuild = false; }
     else { viewport.querySelectorAll('img').forEach(img => img.classList.add('instant')); }
   }
@@ -243,7 +246,32 @@ function boot(PINS) {
   let lastTs = null, paused = false, autoScroll = false;
   // offset is vt * speed, so moving the wall dy pixels is dy/speed seconds
   function nudge(dy) { if (speed) vt += dy / speed; }
+
+  // The loop is capped at FPS_CAP rather than running at display rate: at the
+  // default speed the wall drifts 0.4px per 60Hz frame, so half those frames
+  // composite the whole wall for a move the eye can't resolve. 30fps looks
+  // identical and costs half. startLoop/stopLoop exist so the animation can
+  // actually be switched OFF -- WebViewScreenSaver keeps the page alive long
+  // after the screensaver leaves the screen, and an unconditional rAF chain
+  // there burns a CPU core indefinitely.
+  // The -4ms tolerance matters: this display runs at 120Hz, so frames arrive
+  // every 8.33ms. A bare 33.33ms gate lands right on the 4-frame boundary and
+  // float jitter makes it alternate 4- and 5-frame gaps -- ~25fps with visible
+  // judder. Backing the threshold off by less than one display frame makes it
+  // land cleanly on every 4th frame at 120Hz, every 2nd at 60Hz, 8th at 240Hz.
+  const FPS_CAP = 30, FRAME_MS = 1000 / FPS_CAP - 4;
+  // Only skip a write when the wall is genuinely static (speed 0, hover-pause).
+  // Anything larger quantises slow scroll speeds into visible steps.
+  const MIN_MOVE_PX = 0.05;
+  let rafId = null, running = false, lastFrame = 0;
+
+  function setPromoted(on) {
+    columns.forEach(c => { c.el.style.willChange = on ? 'transform' : ''; });
+  }
   function tick(now) {
+    rafId = requestAnimationFrame(tick);
+    if (now - lastFrame < FRAME_MS) return;
+    lastFrame = now;
     if (gallery) {
       if (lastTs == null) lastTs = now;
       if (autoScroll && !paused) vt += (now - lastTs) / 1000;
@@ -252,8 +280,23 @@ function boot(PINS) {
     const t = gallery ? vt : (Date.now() / 1000);
     columns.forEach((c) => { if (!c.loopHeight) return;
       const off = ((t * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight;
+      // skip the write when the wall hasn't visibly moved (speed 0, paused hover)
+      if (c.lastOff != null && Math.abs(off - c.lastOff) < MIN_MOVE_PX) return;
+      c.lastOff = off;
       c.el.style.transform = `translateY(${-off}px)`; });
-    requestAnimationFrame(tick);
+  }
+  function startLoop() {
+    if (running) return;
+    running = true; lastTs = null; lastFrame = 0;
+    setPromoted(true);
+    rafId = requestAnimationFrame(tick);
+  }
+  function stopLoop() {
+    if (!running) return;
+    running = false;
+    if (rafId != null) cancelAnimationFrame(rafId);
+    rafId = null;
+    setPromoted(false);
   }
 
   // gallery interactions: scroll/drag the wall by hand, click opens the pin
@@ -320,12 +363,31 @@ function boot(PINS) {
     });
   }
 
+  // Re-check the feed on a timer, but only reload if it actually changed.
+  // The old code reloaded unconditionally, which re-fetched and re-decoded every
+  // image on the wall once an hour whether or not the harvester had written
+  // anything new. Uses a <script> tag rather than fetch() so it still works when
+  // the screensaver loads this page over file:// (fetch is CORS-blocked there).
+  function reloadNow() {
+    const u = new URL(location.href);
+    u.searchParams.set('t', Date.now());
+    location.replace(u.toString());
+  }
+  function checkForNewPins() {
+    const s = document.createElement('script');
+    s.src = 'pins.js?t=' + Date.now();
+    s.onload = () => {
+      s.remove();
+      const fresh = (Array.isArray(window.PINS) ? window.PINS : [])
+        .map(p => typeof p === 'string' ? p : (p && p.img))
+        .filter(Boolean);
+      if (fresh.length && signature(fresh) !== sig) reloadNow();
+    };
+    s.onerror = () => s.remove();
+    document.head.appendChild(s);
+  }
   if (!gallery && RELOAD_MINUTES > 0) {
-    setTimeout(() => {
-      const u = new URL(location.href);
-      u.searchParams.set('t', Date.now());
-      location.replace(u.toString());
-    }, RELOAD_MINUTES * 60 * 1000);
+    setInterval(checkForNewPins, RELOAD_MINUTES * 60 * 1000);
   }
 
   let resizeTimer = null;
@@ -360,8 +422,12 @@ function boot(PINS) {
     started = true;
     setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(revealEntrance)), startDelay);
   }
-  window.addEventListener('pageshow', start);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') start(); });
+  window.addEventListener('pageshow', () => { start(); startLoop(); });
+  window.addEventListener('pagehide', stopLoop);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { start(); startLoop(); }
+    else stopLoop();
+  });
 
   if (params.get('debug')) {
     const hud = document.createElement('div');
@@ -377,7 +443,7 @@ function boot(PINS) {
   }
 
   build();
-  requestAnimationFrame(tick);
+  startLoop();
   start();
 }
 </script>
@@ -413,7 +479,7 @@ GALLERYEOF
 # ---------------------------------------------------------------------------
 cat > harvest_feed.py << 'PYEOF2'
 #!/usr/bin/env python3
-import os, re, sys, time, json, random
+import os, re, sys, time, json, random, subprocess
 from playwright.sync_api import sync_playwright
 
 PINS_FILE = "pins.js"        # writes here — pinwall.html reads it
@@ -440,8 +506,24 @@ def logged_out(page):
     except Exception: pass
     return False
 
+def on_battery():
+    """True when running on the internal battery."""
+    try:
+        out = subprocess.run(["/usr/bin/pmset", "-g", "ps"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return "Battery Power" in out
+    except Exception:
+        return False   # can't tell -> don't block the fetch
+
 def main():
     headless = "--headless" in sys.argv
+    # Don't spin up a whole Chromium on battery. launchd runs a missed
+    # StartInterval job the moment the Mac wakes, so without this a 5-second
+    # dark wake with the lid shut turns into a multi-minute full-power scrape.
+    # --now (manual run) always goes ahead.
+    if headless and "--now" not in sys.argv and on_battery():
+        print("On battery - skipping this fetch. Will retry next interval on AC.")
+        sys.exit(0)
     # Jitter scheduled runs so fetches never land on a clock boundary.
     # launchd fires hourly; a random 0-20min delay makes real fetches
     # 40-80min apart (avg 1h), which reads far less like a bot to Pinterest.
@@ -569,6 +651,86 @@ PLISTEOF
 launchctl unload "$PLIST" 2>/dev/null
 launchctl load -w "$PLIST" && echo "    scheduled (~hourly + jitter). Change StartInterval in $PLIST to adjust."
 
+# ---------------------------------------------------------------------------
+# 5c. Watchdog for the runaway screensaver host
+#
+# WebViewScreenSaver's host process (legacyScreenSaver) can outlive the
+# screensaver by days. One instance here stayed up 15 days animating an
+# invisible page at ~7% of a CPU core -- the highest-power process on the Mac.
+# There is no in-page signal for "the screensaver left the screen", so we detect
+# it from outside: recent keyboard/trackpad input proves the screensaver isn't
+# showing, so a live host process is a leak.
+# ---------------------------------------------------------------------------
+echo "==> Installing screensaver watchdog..."
+cat > "$DIR/pinwall-watchdog.sh" << 'WDEOF'
+#!/bin/sh
+GRACE=60
+LOG="$HOME/pinwall/watchdog.log"
+
+IDLE_NS=$(ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ {print $NF; exit}')
+case "$IDLE_NS" in
+  ''|*[!0-9]*) exit 0 ;;
+esac
+IDLE_S=$((IDLE_NS / 1000000000))
+[ "$IDLE_S" -ge "$GRACE" ] && exit 0
+
+for PID in $(pgrep -x legacyScreenSaver 2>/dev/null); do
+  lsof -p "$PID" 2>/dev/null | grep -q "WebViewScreenSaver" || continue
+  if kill "$PID" 2>/dev/null; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') killed stuck WebViewScreenSaver host pid $PID (user active ${IDLE_S}s ago)" >> "$LOG"
+  fi
+done
+exit 0
+WDEOF
+chmod +x "$DIR/pinwall-watchdog.sh"
+
+WDPLIST="$HOME/Library/LaunchAgents/com.aditya.pinwall.watchdog.plist"
+cat > "$WDPLIST" << WDPLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.aditya.pinwall.watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>$DIR/pinwall-watchdog.sh</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$DIR/watchdog.log</string>
+  <key>StandardErrorPath</key><string>$DIR/watchdog.log</string>
+</dict>
+</plist>
+WDPLISTEOF
+launchctl unload "$WDPLIST" 2>/dev/null
+launchctl load -w "$WDPLIST" && echo "    watchdog running (checks every 5 min)."
+
+# ---------------------------------------------------------------------------
+# 5d. Remove leftovers from the older PinterestScreensaver build
+#
+# That build installed three launch agents of its own -- including a KeepAlive
+# daemon polling Spotify/Music via osascript every ~3 seconds, which never
+# worked -- and they were never uninstalled, so both generations ran at once.
+# ---------------------------------------------------------------------------
+OLD_FOUND=0
+for J in com.user.pinterestscreensaver \
+         com.user.pinterestscreensaver.refresh \
+         com.user.pinterestscreensaver.nowplaying; do
+  OLDP="$HOME/Library/LaunchAgents/$J.plist"
+  if [ -f "$OLDP" ]; then
+    OLD_FOUND=1
+    launchctl unload -w "$OLDP" 2>/dev/null
+    rm -f "$OLDP"
+    echo "    removed stale job $J"
+  fi
+done
+if [ -d "$HOME/Library/Application Support/PinterestScreensaver" ]; then
+  OLD_FOUND=1
+  rm -rf "$HOME/Library/Application Support/PinterestScreensaver"
+  echo "    removed stale install dir"
+fi
+[ "$OLD_FOUND" = "1" ] && echo "==> Cleaned up the previous PinterestScreensaver build."
 
 # ---------------------------------------------------------------------------
 # 6. Final manual step (macOS won't let a script set the screensaver itself,
