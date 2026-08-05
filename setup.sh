@@ -696,7 +696,7 @@ cat > "$WDPLIST" << WDPLISTEOF
     <string>/bin/sh</string>
     <string>$DIR/pinwall-watchdog.sh</string>
   </array>
-  <key>StartInterval</key><integer>300</integer>
+  <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$DIR/watchdog.log</string>
   <key>StandardErrorPath</key><string>$DIR/watchdog.log</string>
@@ -704,7 +704,7 @@ cat > "$WDPLIST" << WDPLISTEOF
 </plist>
 WDPLISTEOF
 launchctl unload "$WDPLIST" 2>/dev/null
-launchctl load -w "$WDPLIST" && echo "    watchdog running (checks every 5 min)."
+launchctl load -w "$WDPLIST" && echo "    watchdog running (checks every 60s)."
 
 # ---------------------------------------------------------------------------
 # 5d. Remove leftovers from the older PinterestScreensaver build
