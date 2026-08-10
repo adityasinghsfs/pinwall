@@ -1,2 +1,5 @@
 .DS_Store
 dist/
+build/
+# XcodeGen generates this from app/project.yml (run: xcodegen generate)
+app/PinWall.xcodeproj/

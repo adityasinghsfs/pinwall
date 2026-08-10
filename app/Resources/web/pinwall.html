@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>PinWall</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  /* cursor is only hidden while the screensaver is actually showing; the app
+     preview, gallery and tuner all keep it visible */
+  body.tuning, body.gallery, body.app { cursor: auto; }
+  #viewport { position: fixed; inset: 0; display: flex; gap: var(--gap);
+    padding: var(--gap); box-sizing: border-box; background: #000; }
+  /* no static will-change: it pins a full-height GPU layer per column for the
+     life of the page. The loop sets it while animating and drops it on pause. */
+  .col { flex: 1; position: relative; }
+  .col img { width: 100%; display: block; margin-bottom: var(--gap);
+    border-radius: 12px; background: #0b0b0b; -webkit-user-select: none; user-select: none;
+    opacity: 0; transform: translateY(var(--rise));
+    transition: opacity var(--fade) ease-out, transform var(--fade) ease-out; }
+  .col img.show    { opacity: 1; transform: none; }
+  .col img.instant { opacity: 1; transform: none; transition: none; }
+  /* gallery mode: clickable tiles */
+  body.gallery .col img { cursor: pointer; }
+  body.gallery .col img.show:hover, body.gallery .col img.instant:hover {
+    transform: scale(1.03); box-shadow: 0 0 0 2px #fff; transition: transform 150ms ease; }
+
+  /* skeleton state: shown before any pins exist (native app, pre-login) */
+  #skeleton { position: fixed; inset: 0; display: none; gap: var(--gap);
+    padding: var(--gap); box-sizing: border-box; background: #000; }
+  body.skeleton #skeleton { display: flex; }
+  body.skeleton #viewport { display: none; }
+  #skeleton .col { flex: 1; display: flex; flex-direction: column; gap: var(--gap); }
+  #skeleton .sk { width: 100%; border-radius: 12px;
+    background: linear-gradient(100deg, #0d0d0f 30%, #191920 50%, #0d0d0f 70%);
+    background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+
+  #tuner { position: fixed; top: 16px; left: 16px; z-index: 9999; display: none; width: 240px;
+    background: rgba(20,20,22,.92); color: #e8e8ea; backdrop-filter: blur(10px);
+    font: 12px/1.4 -apple-system, system-ui, sans-serif; padding: 14px 16px;
+    border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.55); }
+  #tuner.open { display: block; }
+  #tuner h4 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .02em; }
+  #tuner label { display: flex; justify-content: space-between; margin: 12px 0 4px; opacity: .7; }
+  #tuner input[type=range] { width: 100%; accent-color: #fff; }
+  #tuner .row { display: flex; gap: 8px; margin-top: 14px; }
+  #tuner button { flex: 1; background: #2a2a2e; color: #fff; border: 0; padding: 7px;
+    border-radius: 8px; cursor: pointer; font: inherit; }
+  #tuner button:hover { background: #3a3a40; }
+  #tuner code { display: block; margin-top: 10px; padding: 8px; background: #000;
+    border-radius: 6px; word-break: break-all; opacity: .85; font-size: 11px; }
+  #tuner .hint { margin-top: 8px; opacity: .45; font-size: 11px; }
+  #ghint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9999;
+    display: none; font: 12px/1 -apple-system, system-ui, sans-serif; color: #fff;
+    background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 20px; backdrop-filter: blur(8px); }
+  body.gallery #ghint { display: block; }
+  /* inside PinWall.app, the native "browse mode" banner replaces this hint */
+  body.app #ghint { display: none !important; }
+
+  /* ---- clock + date overlay (macOS-style: ultralight; position/size set by JS) ---- */
+  #clock { position: fixed; top: 9vh; left: 0; right: 0; z-index: 60; display: none;
+    text-align: center; color: #fff; pointer-events: none;
+    text-shadow: 0 2px 30px rgba(0,0,0,.45);
+    font-family: "SF Pro Display", -apple-system, system-ui, sans-serif;
+    font-variant-numeric: tabular-nums; --clock-scale: 1; }
+  body.clock #clock { display: block; }
+  #clock .clockbox { display: inline-block; }
+  #clock .date { font-size: calc(clamp(16px, 1.9vw, 30px) * var(--clock-scale)); font-weight: 500;
+    opacity: .95; letter-spacing: .01em; margin-bottom: .04em; }
+  #clock .time { font-size: calc(clamp(92px, 15vw, 240px) * var(--clock-scale)); font-weight: 200;
+    letter-spacing: -.03em; line-height: .95; }
+</style>
+</head>
+<body>
+<div id="clock"><div class="clockbox"><div class="date"></div><div class="time"></div></div></div>
+<div id="viewport"></div>
+<div id="skeleton"></div>
+<div id="ghint">Gallery — scroll or drag to move, click a pin to open it on Pinterest</div>
+
+<div id="tuner">
+  <h4>PinWall tuner</h4>
+  <label>Speed <span id="vSpeed"></span></label>
+  <input type="range" id="sSpeed" min="2" max="120" step="1">
+  <label>Fade (ms) <span id="vFade"></span></label>
+  <input type="range" id="sFade" min="0" max="1200" step="10">
+  <label>Rise (px) <span id="vRise"></span></label>
+  <input type="range" id="sRise" min="0" max="120" step="1">
+  <label>Stagger (ms) <span id="vStagger"></span></label>
+  <input type="range" id="sStagger" min="0" max="1500" step="10">
+  <div class="row">
+    <button id="bReplay">Replay</button>
+    <button id="bCopy">Copy URL</button>
+  </div>
+  <code id="urlOut"></code>
+  <div class="hint">Press T to hide. Append this to your screensaver URL.</div>
+</div>
+
+<script>
+// ---- defaults --------------------------------------------------------------
+const SPEED          = 24;
+const COLUMN_WIDTH   = 320;
+const GAP            = 14;
+const RELOAD_MINUTES = 60;
+const FADE_MS        = 300;
+const RISE_PX        = 24;
+const STAGGER_MS     = 350;
+const START_DELAY    = 600;
+
+// ---- native bridge ---------------------------------------------------------
+// The Swift host (app preview + screensaver) injects, at documentStart:
+//   window.PINS          = [{img, link}, ...]   the harvested feed
+//   window.PINWALL_CONFIG = { speed, fade, rise, stagger, delay, gallery }
+// When absent (opened directly in a browser) we fall back to pins.js + the
+// URL query string + localStorage, exactly as the standalone screensaver did.
+const NATIVE = (typeof window.PINWALL_CONFIG === 'object' && window.PINWALL_CONFIG !== null)
+  ? window.PINWALL_CONFIG : null;
+
+// ---- clock + date overlay -------------------------------------------------
+// Top-level (not inside boot) so it works in every mode: demo wall, real feed,
+// AND the logged-in-but-empty skeleton state (where boot() returns early).
+// Uses the system locale/format, like the macOS clock.
+(function initClock() {
+  let on     = NATIVE ? !!NATIVE.clock : false;
+  let pos    = (NATIVE && NATIVE.clockPos) ? NATIVE.clockPos : 'tc';
+  let size   = (NATIVE && NATIVE.clockSize) ? +NATIVE.clockSize : 100;
+  let date   = NATIVE ? (NATIVE.clockDate !== false) : true;
+  let font   = (NATIVE && NATIVE.clockFont) ? NATIVE.clockFont : 'system';
+  let weight = (NATIVE && NATIVE.clockWeight) ? +NATIVE.clockWeight : 200;
+  let glass  = NATIVE ? !!NATIVE.clockGlass : false;
+  let color  = (NATIVE && NATIVE.clockColor) ? NATIVE.clockColor : '#FFFFFF';
+  let timer = null;
+  const el = document.getElementById('clock');
+  function rgba(hex, a) {
+    var s = (hex && hex.charAt(0) === '#') ? hex.slice(1) : (hex || 'ffffff');
+    if (s.length === 3) s = s.split('').map(function (c) { return c + c; }).join('');
+    var n = parseInt(s, 16); if (isNaN(n)) n = 0xFFFFFF;
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  const FONTS = {
+    system:  '-apple-system, "SF Pro Display", system-ui, sans-serif',
+    rounded: '"SF Pro Rounded", ui-rounded, "Hiragino Maru Gothic ProN", -apple-system, sans-serif',
+    serif:   '"New York", ui-serif, Georgia, "Times New Roman", serif',
+    mono:    'ui-monospace, "SF Mono", Menlo, monospace'
+  };
+
+  function paint() {
+    if (!el) return;
+    const d = new Date();
+    el.querySelector('.time').textContent = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    el.querySelector('.date').textContent = d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  }
+  function place() {
+    if (!el) return;
+    const v = pos.charAt(0), h = pos.charAt(1);   // t/c/b , l/c/r
+    el.style.top = el.style.bottom = el.style.left = el.style.right = 'auto';
+    if (v === 't') el.style.top = '9vh';
+    else if (v === 'b') el.style.bottom = '9vh';
+    else el.style.top = '50%';
+    if (h === 'l') { el.style.left = '6vw'; el.style.textAlign = 'left'; }
+    else if (h === 'r') { el.style.right = '6vw'; el.style.textAlign = 'right'; }
+    else { el.style.left = '0'; el.style.right = '0'; el.style.textAlign = 'center'; }
+    el.style.transform = (v === 'c') ? 'translateY(-50%)' : 'none';
+    el.style.setProperty('--clock-scale', (size / 100));
+    el.style.fontFamily = FONTS[font] || FONTS.system;
+    const timeEl = el.querySelector('.time'), dateEl = el.querySelector('.date');
+    timeEl.style.fontWeight = String(weight);
+    if (glass) {
+      // frosted "glass" letters: translucent tinted fill + a bright edge, so the
+      // wall shows through the glyphs themselves
+      el.style.color = rgba(color, 0.22);
+      [timeEl, dateEl].forEach(function (t) {
+        t.style.webkitTextStroke = '1px ' + rgba(color, 0.55);
+        t.style.textShadow = '0 1px 1px rgba(255,255,255,.25), 0 6px 26px rgba(0,0,0,.5)';
+      });
+    } else {
+      el.style.color = color;
+      [timeEl, dateEl].forEach(function (t) { t.style.webkitTextStroke = ''; t.style.textShadow = ''; });
+    }
+    dateEl.style.display = date ? '' : 'none';
+  }
+  function apply() {
+    document.body.classList.toggle('clock', on);
+    place();
+    if (on) { paint(); if (!timer) timer = setInterval(paint, 1000); }
+    else if (timer) { clearInterval(timer); timer = null; }
+  }
+  window.pinwallSetClock = function (v) { on = !!v; apply(); };
+  window.pinwallClockConfig = function (cfg) {
+    if (cfg.pos    != null) pos    = cfg.pos;
+    if (cfg.size   != null) size   = +cfg.size;
+    if (cfg.date   != null) date   = !!cfg.date;
+    if (cfg.font   != null) font   = cfg.font;
+    if (cfg.weight != null) weight = +cfg.weight;
+    if (cfg.glass  != null) glass  = !!cfg.glass;
+    if (cfg.color  != null) color  = cfg.color;
+    try { place(); } catch (e) {}
+  };
+  try { apply(); } catch (e) {}   // never let a clock error block the wall
+})();
+
+// ---- pure helpers ----------------------------------------------------------
+function demoPins() {
+  const heights = [360, 480, 300, 540, 420, 600, 380, 460, 320, 500];
+  const out = [];
+  for (let i = 1; i <= 48; i++) out.push({ img: `https://picsum.photos/seed/pin${i}/600/${heights[i % heights.length]}`, link: "" });
+  return out;
+}
+function signature(arr) {
+  let h = 5381; const s = arr.join('|');
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return arr.length + ':' + (h >>> 0);
+}
+function seedFrom(str) { let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0;
+  let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---- load pins, then boot --------------------------------------------------
+// Native host injects window.PINS synchronously before this runs; prefer it.
+// Otherwise pull pins.js over file:// (fetch is CORS-blocked there, so a
+// <script> tag is the only option).
+(function loadPins() {
+  if (Array.isArray(window.PINS)) { boot(window.PINS); return; }
+  const s = document.createElement('script');
+  s.src = 'pins.js';
+  s.onload  = () => boot(Array.isArray(window.PINS) ? window.PINS : []);
+  s.onerror = () => boot([]);
+  document.head.appendChild(s);
+})();
+
+// ============================================================================
+function boot(PINS) {
+  // battery "clock only" mode: skip the wall entirely (black bg + the top-level
+  // clock is all that shows). Keeps the screensaver low-power on battery.
+  if (NATIVE && NATIVE.hideWall) return;
+
+  // normalize: accept both ["url", ...] and [{img, link}, ...]
+  let base = (PINS || [])
+    .map(p => typeof p === 'string' ? { img: p, link: '' } : p)
+    .filter(p => p && p.img);
+
+  // Native, logged in but empty feed -> skeleton. Standalone/browser -> demo.
+  const showSkeleton = NATIVE && NATIVE.skeleton && base.length === 0;
+  if (!base.length && !showSkeleton) base = demoPins();
+
+  const sig  = signature(base.map(p => p.img));
+  const rand = mulberry32(seedFrom(sig));
+  const sources = base.map(v => [rand(), v]).sort((a,b)=>a[0]-b[0]).map(p => p[1]);
+
+  const params = new URLSearchParams(location.search);
+  const gallery = NATIVE ? !!NATIVE.gallery : !!params.get('gallery');
+  let savedTuner = {};
+  try { const s = localStorage.getItem('pinwall_tuner');
+    if (s) savedTuner = Object.fromEntries(new URLSearchParams(s)); } catch (e) {}
+  // precedence: native config > URL param > saved tuner > default
+  const pick = (k, d) => {
+    if (NATIVE && NATIVE[k] != null) { const n = parseFloat(NATIVE[k]); if (!isNaN(n)) return n; }
+    const u = params.get(k);
+    if (u !== null && u !== '') { const n = parseFloat(u); if (!isNaN(n)) return n; }
+    if (savedTuner[k] != null) { const n = parseFloat(savedTuner[k]); if (!isNaN(n)) return n; }
+    return d;
+  };
+  let speed     = pick('speed',   SPEED);
+  let fadeMs    = pick('fade',    FADE_MS);
+  let risePx    = pick('rise',    RISE_PX);
+  let staggerMs = pick('stagger', STAGGER_MS);
+  let colOverride = pick('columns', 0);   // 0 = auto-fit by width (browser default)
+  let startDelay = gallery ? 0 : pick('delay', START_DELAY);
+
+  function persistParams() {
+    const qs = `speed=${speed}&fade=${fadeMs}&rise=${risePx}&stagger=${staggerMs}`;
+    try { history.replaceState(null, '', '?' + qs); } catch (e) {}
+    try { localStorage.setItem('pinwall_tuner', qs); } catch (e) {}
+    // let the native host persist to shared settings when embedded
+    try { if (window.webkit?.messageHandlers?.pinwall)
+      window.webkit.messageHandlers.pinwall.postMessage({ type: 'tuner', speed, fade: fadeMs, rise: risePx, stagger: staggerMs }); } catch (e) {}
+  }
+
+  const root = document.documentElement;
+  root.style.setProperty('--gap', GAP + 'px');
+  function applyCssVars() {
+    root.style.setProperty('--fade', fadeMs + 'ms');
+    root.style.setProperty('--rise', risePx + 'px');
+  }
+  applyCssVars();
+  if (gallery) document.body.classList.add('gallery');
+  if (NATIVE && NATIVE.app) document.body.classList.add('app');
+
+  const viewport = document.getElementById('viewport');
+
+  if (showSkeleton) { renderSkeleton(); return; }
+
+  let columns = [], firstBuild = true;
+
+  function build() {
+    viewport.innerHTML = ''; columns = [];
+    const colCount = (colOverride >= 2)
+      ? Math.round(colOverride)
+      : Math.max(2, Math.floor(window.innerWidth / COLUMN_WIDTH));
+    const buckets = Array.from({ length: colCount }, () => []);
+    sources.forEach((item, i) => buckets[i % colCount].push(item));
+    buckets.forEach((bucket, ci) => {
+      const col = document.createElement('div'); col.className = 'col';
+      const makeImg = (item) => { const img = document.createElement('img'); img.src = item.img;
+        if (item.link) img.dataset.link = item.link;
+        img.loading = 'eager'; img.addEventListener('load', scheduleRemeasure);
+        img.addEventListener('error', scheduleRemeasure); return img; };
+      bucket.forEach((item) => col.appendChild(makeImg(item)));
+      bucket.forEach((item) => col.appendChild(makeImg(item)));
+      viewport.appendChild(col);
+      columns.push({ el: col, loopHeight: 0, phase: ci * 173 });
+    });
+    remeasure();
+    if (running) setPromoted(true);   // columns are new objects; re-promote them
+    if (firstBuild) { firstBuild = false; }
+    else { viewport.querySelectorAll('img').forEach(img => img.classList.add('instant')); }
+  }
+
+  function fadeIn(img, delay) { img.style.transitionDelay = (delay || 0) + 'ms'; img.classList.add('show'); }
+  function paintThenFade(img, delay) {
+    const go = () => fadeIn(img, delay);
+    if (img.decode) img.decode().then(go).catch(go); else go();
+  }
+  function revealEntrance() {
+    const vh = window.innerHeight;
+    const onScreen = img => { const r = img.getBoundingClientRect(); return r.bottom > 0 && r.top < vh; };
+    viewport.querySelectorAll('img').forEach(img => {
+      if (img.complete && img.naturalHeight > 0) {
+        if (onScreen(img)) {
+          const r = img.getBoundingClientRect();
+          const t = Math.min(Math.max(r.top, 0), vh) / vh;
+          paintThenFade(img, staggerMs * (1 - t));
+        } else { img.classList.add('instant'); }
+      } else {
+        const done = () => { img.removeEventListener('load', done); img.removeEventListener('error', err);
+          if (onScreen(img)) paintThenFade(img, 0); else img.classList.add('instant'); };
+        const err = () => { img.removeEventListener('load', done); img.removeEventListener('error', err); img.classList.add('instant'); };
+        img.addEventListener('load', done);
+        img.addEventListener('error', err);
+        if (img.complete) { if (img.naturalHeight > 0) done(); else err(); }
+      }
+    });
+    setTimeout(() => viewport.querySelectorAll('img:not(.show):not(.instant)')
+      .forEach(i => i.classList.add('instant')), 8000);
+  }
+  function replayEntrance() {
+    const imgs = viewport.querySelectorAll('img');
+    imgs.forEach(img => { img.style.transition = 'none'; img.classList.remove('show', 'instant'); img.style.transitionDelay = ''; });
+    void viewport.offsetWidth;
+    imgs.forEach(img => { img.style.transition = ''; });
+    void viewport.offsetWidth;
+    requestAnimationFrame(() => requestAnimationFrame(revealEntrance));
+  }
+  function remeasure() {
+    columns.forEach((c) => { const h = c.el.scrollHeight / 2; if (h > 0) c.loopHeight = h; });
+  }
+  let remeasureTimer = null;
+  function scheduleRemeasure() { clearTimeout(remeasureTimer); remeasureTimer = setTimeout(remeasure, 120); }
+
+  // scroll: real clock in the screensaver (resumes across launches);
+  // in gallery mode a virtual clock you can drive by hand. It starts at the real
+  // clock, so the gallery opens on exactly the wall the screensaver is showing
+  // right now -- scroll up and you're looking at pins that just went past.
+  let vt = gallery ? Date.now() / 1000 : 0;
+  let lastTs = null, paused = false, autoScroll = false;
+  // offset is vt * speed, so moving the wall dy pixels is dy/speed seconds
+  function nudge(dy) { if (speed) vt += dy / speed; }
+
+  const FPS_CAP = 30, FRAME_MS = 1000 / FPS_CAP - 4;
+  const MIN_MOVE_PX = 0.05;
+  let rafId = null, running = false, lastFrame = 0;
+
+  function setPromoted(on) {
+    columns.forEach(c => { c.el.style.willChange = on ? 'transform' : ''; });
+  }
+  function tick(now) {
+    rafId = requestAnimationFrame(tick);
+    if (now - lastFrame < FRAME_MS) return;
+    lastFrame = now;
+    if (gallery) {
+      if (lastTs == null) lastTs = now;
+      if (autoScroll && !paused) vt += (now - lastTs) / 1000;
+      lastTs = now;
+    }
+    const t = gallery ? vt : (Date.now() / 1000);
+    columns.forEach((c) => { if (!c.loopHeight) return;
+      const off = ((t * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight;
+      // skip the write when the wall hasn't visibly moved (speed 0, paused hover)
+      if (c.lastOff != null && Math.abs(off - c.lastOff) < MIN_MOVE_PX) return;
+      c.lastOff = off;
+      c.el.style.transform = `translateY(${-off}px)`; });
+  }
+  function startLoop() {
+    if (running) return;
+    running = true; lastTs = null; lastFrame = 0;
+    setPromoted(true);
+    rafId = requestAnimationFrame(tick);
+  }
+  function stopLoop() {
+    if (!running) return;
+    running = false;
+    if (rafId != null) cancelAnimationFrame(rafId);
+    rafId = null;
+    setPromoted(false);
+  }
+
+  // gallery interactions: scroll/drag the wall by hand, click opens the pin
+  if (gallery) {
+    const hint = document.getElementById('ghint');
+    const BASE_HINT = 'Scroll or drag to move · click a pin to open it on Pinterest · Space = auto-scroll · L = live position';
+    let hintTimer = null;
+    hint.textContent = BASE_HINT;
+    function flashHint(msg) {
+      hint.textContent = msg;
+      clearTimeout(hintTimer);
+      hintTimer = setTimeout(() => { hint.textContent = BASE_HINT; }, 1800);
+    }
+    function setAuto(on) { autoScroll = on; flashHint(on ? 'Auto-scroll on' : 'Auto-scroll off'); }
+
+    // hover stops the drift so you can aim at a tile
+    viewport.addEventListener('mouseover', e => { if (e.target.closest('img')) paused = true; });
+    viewport.addEventListener('mouseout',  e => { if (e.target.closest('img')) paused = false; });
+
+    // wheel / trackpad: move the wall either direction. Takes over from the drift.
+    viewport.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (autoScroll) setAuto(false);
+      nudge(e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1));
+    }, { passive: false });
+
+    // drag to pan; a real drag swallows the click so it doesn't open a pin
+    let dragging = false, dragY = 0, moved = 0;
+    viewport.addEventListener('mousedown', e => {
+      dragging = true; dragY = e.clientY; moved = 0; e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const dy = e.clientY - dragY; dragY = e.clientY;
+      moved += Math.abs(dy);
+      if (moved > 4 && autoScroll) setAuto(false);
+      nudge(-dy);
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    // keys: arrows / page step, space toggles the drift, L jumps to the live wall
+    window.addEventListener('keydown', e => {
+      const page = window.innerHeight * 0.9;
+      if      (e.key === 'ArrowUp')   nudge(-140);
+      else if (e.key === 'ArrowDown') nudge(140);
+      else if (e.key === 'PageUp')    nudge(-page);
+      else if (e.key === 'PageDown')  nudge(page);
+      else if (e.key === ' ')         { setAuto(!autoScroll); e.preventDefault(); return; }
+      else if (e.key === 'l' || e.key === 'L') {
+        vt = Date.now() / 1000; flashHint('Jumped to the live screensaver position');
+        e.preventDefault(); return;
+      }
+      else return;
+      e.preventDefault();
+      if (autoScroll) setAuto(false);
+    });
+
+    // click opens the pin on Pinterest
+    viewport.addEventListener('click', e => {
+      if (moved > 4) { moved = 0; return; }
+      const img = e.target.closest('img'); if (!img) return;
+      const url = img.dataset.link || img.src;
+      if (url) window.open(url, '_blank');
+    });
+  }
+
+  // Re-check the feed on a timer, but only reload if it actually changed.
+  // Uses a <script> tag rather than fetch() so it still works over file://.
+  // Skipped when the native host owns the pins (it re-injects instead).
+  function reloadNow() {
+    const u = new URL(location.href);
+    u.searchParams.set('t', Date.now());
+    location.replace(u.toString());
+  }
+  function checkForNewPins() {
+    const s = document.createElement('script');
+    s.src = 'pins.js?t=' + Date.now();
+    s.onload = () => {
+      s.remove();
+      const fresh = (Array.isArray(window.PINS) ? window.PINS : [])
+        .map(p => typeof p === 'string' ? p : (p && p.img))
+        .filter(Boolean);
+      if (fresh.length && signature(fresh) !== sig) reloadNow();
+    };
+    s.onerror = () => s.remove();
+    document.head.appendChild(s);
+  }
+  if (!gallery && !NATIVE && RELOAD_MINUTES > 0) {
+    setInterval(checkForNewPins, RELOAD_MINUTES * 60 * 1000);
+  }
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(build, 200); });
+
+  // ---- tuner ----
+  const tuner = document.getElementById('tuner');
+  const el = id => document.getElementById(id);
+  const sliders = { speed: el('sSpeed'), fade: el('sFade'), rise: el('sRise'), stagger: el('sStagger') };
+  const vals    = { speed: el('vSpeed'), fade: el('vFade'), rise: el('vRise'), stagger: el('vStagger') };
+  function syncTuner() {
+    sliders.speed.value = speed;       vals.speed.textContent   = speed;
+    sliders.fade.value  = fadeMs;      vals.fade.textContent    = fadeMs;
+    sliders.rise.value  = risePx;      vals.rise.textContent    = risePx;
+    sliders.stagger.value = staggerMs; vals.stagger.textContent = staggerMs;
+    el('urlOut').textContent = `?speed=${speed}&fade=${fadeMs}&rise=${risePx}&stagger=${staggerMs}`;
+  }
+  sliders.speed.addEventListener('input',   e => { speed = +e.target.value; syncTuner(); persistParams(); });
+  sliders.fade.addEventListener('input',    e => { fadeMs = +e.target.value; applyCssVars(); syncTuner(); persistParams(); });
+  sliders.rise.addEventListener('input',    e => { risePx = +e.target.value; applyCssVars(); syncTuner(); persistParams(); });
+  sliders.stagger.addEventListener('input', e => { staggerMs = +e.target.value; syncTuner(); persistParams(); });
+  el('bReplay').addEventListener('click', replayEntrance);
+  el('bCopy').addEventListener('click', () => { navigator.clipboard.writeText(el('urlOut').textContent).catch(() => {}); });
+  function toggleTuner() { const open = tuner.classList.toggle('open'); document.body.classList.toggle('tuning', open); if (open) syncTuner(); }
+  window.addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') toggleTuner(); });
+  if (params.get('tune')) toggleTuner();
+
+  // The native app drives settings live without a reload by calling
+  // window.pinwallApply({speed, fade, rise, stagger}).
+  window.pinwallApply = function (cfg) {
+    if (cfg.speed   != null) speed     = +cfg.speed;
+    if (cfg.fade    != null) fadeMs    = +cfg.fade;
+    if (cfg.rise    != null) risePx    = +cfg.rise;
+    if (cfg.stagger != null) staggerMs = +cfg.stagger;
+    applyCssVars(); syncTuner();
+    if (cfg.columns != null) {
+      const c = +cfg.columns;
+      if (c !== colOverride) { colOverride = c; build(); }   // relayout on column change
+    }
+    if (cfg.clock  != null && window.pinwallSetClock) window.pinwallSetClock(!!cfg.clock);
+  };
+  // The app's "Start" button re-runs the entrance reveal with current settings.
+  window.pinwallReplay = replayEntrance;
+
+  // ---- start ----
+  let started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(revealEntrance)), startDelay);
+  }
+  window.addEventListener('pageshow', () => { start(); startLoop(); });
+  window.addEventListener('pagehide', stopLoop);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { start(); startLoop(); }
+    else stopLoop();
+  });
+
+  if (params.get('debug')) {
+    const hud = document.createElement('div');
+    hud.style.cssText = 'position:fixed;top:8px;right:8px;z-index:99999;font:12px monospace;' +
+      'color:#0f0;background:rgba(0,0,0,.7);padding:8px 10px;border-radius:6px;white-space:pre;pointer-events:none;';
+    document.body.appendChild(hud);
+    setInterval(() => {
+      const imgs = viewport.querySelectorAll('img'); let loaded = 0, shown = 0;
+      imgs.forEach(i => { if (i.complete && i.naturalHeight > 0) loaded++; if (i.classList.contains('show')) shown++; });
+      hud.textContent = `vis: ${document.visibilityState}\nstarted: ${started}\n` +
+        `loaded: ${loaded}/${imgs.length}\nshown: ${shown}\ngallery:${gallery}`;
+    }, 250);
+  }
+
+  build();
+  startLoop();
+  start();
+
+  // ---- skeleton (native, logged in but no pins yet) ----
+  function renderSkeleton() {
+    document.body.classList.add('skeleton');
+    const sk = document.getElementById('skeleton');
+    const heights = [180, 260, 140, 320, 220, 300, 160, 240];
+    const colCount = Math.max(2, Math.floor(window.innerWidth / COLUMN_WIDTH));
+    for (let ci = 0; ci < colCount; ci++) {
+      const col = document.createElement('div'); col.className = 'col';
+      for (let i = 0; i < 8; i++) {
+        const b = document.createElement('div'); b.className = 'sk';
+        b.style.height = heights[(i + ci) % heights.length] + 'px';
+        b.style.animationDelay = ((i + ci) % 6) * 0.12 + 's';
+        col.appendChild(b);
+      }
+      sk.appendChild(col);
+    }
+  }
+}
+</script>
+</body>
+</html>

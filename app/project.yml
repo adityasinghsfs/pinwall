@@ -1,0 +1,78 @@
+name: PinWall
+options:
+  bundleIdPrefix: work.adityasingh
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: GTWF62427T
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    COMBINE_HIDPI_IMAGES: YES
+
+targets:
+  # ---- The app: settings UI + preview + installer + updater + harvester ----
+  PinWall:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/PinWallApp
+      - path: Sources/Shared
+      - path: Resources/web
+        buildPhase: resources
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: work.adityasingh.pinwall
+        PRODUCT_NAME: PinWall
+        PRODUCT_MODULE_NAME: PinWallApp
+        INFOPLIST_FILE: Sources/PinWallApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/PinWallApp/PinWall.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - "@executable_path/../Frameworks"
+    dependencies:
+      - target: PinWallSaver
+        embed: false
+        link: false
+    postBuildScripts:
+      - name: Embed PinWall.saver into Resources
+        script: |
+          set -e
+          SRC="${BUILT_PRODUCTS_DIR}/PinWall.saver"
+          DEST="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          if [ -d "$SRC" ]; then
+            mkdir -p "$DEST"
+            rm -rf "$DEST/PinWall.saver"
+            cp -R "$SRC" "$DEST/PinWall.saver"
+            echo "Embedded PinWall.saver -> $DEST"
+          else
+            echo "warning: PinWall.saver not found at $SRC"
+          fi
+
+  # ---- The screensaver: native ScreenSaverView hosting a WKWebView ----
+  PinWallSaver:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: Sources/PinWallSaver
+      - path: Sources/Shared
+      - path: Resources/web
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: work.adityasingh.pinwall.saver
+        PRODUCT_NAME: PinWall
+        PRODUCT_MODULE_NAME: PinWallSaver
+        WRAPPER_EXTENSION: saver
+        MACH_O_TYPE: mh_bundle
+        INFOPLIST_FILE: Sources/PinWallSaver/Info.plist
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS: Sources/PinWallSaver/PinWallSaver.entitlements
