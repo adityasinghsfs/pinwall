@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PinWall gallery</title>
+<style>html, body { margin: 0; height: 100%; background: #000; }</style>
+</head>
+<body>
+<!--
+  Shortcut into gallery mode. Exists because macOS `open` (and `osascript
+  -e 'open location'`) resolve a file:// URL through LaunchServices to a plain
+  filesystem path, which silently drops "?gallery=1" -- so you'd land in
+  screensaver mode with no cursor and no clickable pins. Redirecting from here
+  is an in-browser navigation, where the query string survives.
+
+  So: `open ~/pinwall/gallery.html` works, in whatever your default browser is.
+-->
+<script>location.replace('pinwall.html?gallery=1');</script>
+</body>
+</html>
