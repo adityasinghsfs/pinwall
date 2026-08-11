@@ -56,6 +56,16 @@
     display: none; font: 12px/1 -apple-system, system-ui, sans-serif; color: #fff;
     background: rgba(0,0,0,.55); padding: 8px 14px; border-radius: 20px; backdrop-filter: blur(8px); }
   body.gallery #ghint { display: block; }
+</style>
+<!-- collect JS errors so the native host can read them out for diagnostics -->
+<script>window.__err='';window.onerror=function(m,s,l){window.__err+=m+'@'+l+' | ';return false;};</script>
+<!-- Sandboxed-screensaver data path: the app publishes settings.js + pins.js
+     next to this file (real home). When this page is instead hosted directly
+     by the app (which injects window.PINWALL_CONFIG / window.PINS at
+     documentStart), these files don't exist and the 404 is harmless. -->
+<script src="settings.js"></script>
+<script src="pins.js"></script>
+<style>
   /* inside PinWall.app, the native "browse mode" banner replaces this hint */
   body.app #ghint { display: none !important; }
 
@@ -188,6 +198,8 @@ const NATIVE = (typeof window.PINWALL_CONFIG === 'object' && window.PINWALL_CONF
     else if (timer) { clearInterval(timer); timer = null; }
   }
   window.pinwallSetClock = function (v) { on = !!v; apply(); };
+  // native hosts repaint the clock directly — setInterval is suspended there
+  window.pinwallClockTick = function () { if (on) paint(); };
   window.pinwallClockConfig = function (cfg) {
     if (cfg.pos    != null) pos    = cfg.pos;
     if (cfg.size   != null) size   = +cfg.size;
@@ -292,7 +304,15 @@ function boot(PINS) {
 
   const viewport = document.getElementById('viewport');
 
-  if (showSkeleton) { renderSkeleton(); return; }
+  if (showSkeleton) {
+    renderSkeleton();
+    // Keep polling pins.js so the wall swaps in as soon as the app publishes
+    // pins — otherwise a saver that booted mid-setup shows shimmer forever.
+    if (NATIVE && NATIVE.reload && RELOAD_MINUTES > 0) {
+      setInterval(checkForNewPins, 60 * 1000);   // check every minute while empty
+    }
+    return;
+  }
 
   let columns = [], firstBuild = true;
 
@@ -377,12 +397,16 @@ function boot(PINS) {
   function setPromoted(on) {
     columns.forEach(c => { c.el.style.willChange = on ? 'transform' : ''; });
   }
-  function tick(now) {
-    rafId = requestAnimationFrame(tick);
+  // One rendered frame. Split out of tick() so a NATIVE host can call it
+  // directly: inside the sandboxed screensaver appex WebKit throttles or
+  // suspends rAF and DOM timers (the page looks "hidden" to it), which left
+  // the wall loaded but invisible.
+  function frame(now) {
+    if (now < lastFrame) lastFrame = now;   // clock source changed (native drive)
     if (now - lastFrame < FRAME_MS) return;
     lastFrame = now;
     if (gallery) {
-      if (lastTs == null) lastTs = now;
+      if (lastTs == null || now < lastTs) lastTs = now;
       if (autoScroll && !paused) vt += (now - lastTs) / 1000;
       lastTs = now;
     }
@@ -393,6 +417,15 @@ function boot(PINS) {
       if (c.lastOff != null && Math.abs(off - c.lastOff) < MIN_MOVE_PX) return;
       c.lastOff = off;
       c.el.style.transform = `translateY(${-off}px)`; });
+  }
+  function tick(now) {
+    rafId = requestAnimationFrame(tick);
+    window.__beats = (window.__beats || 0) + 1;   // rAF liveness heartbeat for the native host
+    if (pendingReveal) {                          // first composited frame: bloom is visible now
+      pendingReveal = false;
+      setTimeout(revealEntrance, startDelay);
+    }
+    frame(now);
   }
   function startLoop() {
     if (running) return;
@@ -493,7 +526,10 @@ function boot(PINS) {
     s.onerror = () => s.remove();
     document.head.appendChild(s);
   }
-  if (!gallery && !NATIVE && RELOAD_MINUTES > 0) {
+  // Re-check pins.js periodically when the page owns its data: standalone
+  // browser use (no NATIVE) or the screensaver's published file mirror
+  // (NATIVE.reload). Skipped in-app, where the host re-injects instead.
+  if (!gallery && (NATIVE ? !!NATIVE.reload : true) && RELOAD_MINUTES > 0) {
     setInterval(checkForNewPins, RELOAD_MINUTES * 60 * 1000);
   }
 
@@ -540,11 +576,18 @@ function boot(PINS) {
   window.pinwallReplay = replayEntrance;
 
   // ---- start ----
-  let started = false;
+  let started = false, pendingReveal = false;
   function start() {
     if (started) return;
     started = true;
-    setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(revealEntrance)), startDelay);
+    if (NATIVE && NATIVE.reload) {
+      // Screensaver: the host is still fading in when the page loads, and the
+      // compositor may not be awake yet — a timer-scheduled bloom would play
+      // invisibly. Wait for the first real composited frame (tick), THEN bloom.
+      pendingReveal = true;
+    } else {
+      setTimeout(revealEntrance, startDelay);
+    }
   }
   window.addEventListener('pageshow', () => { start(); startLoop(); });
   window.addEventListener('pagehide', stopLoop);
@@ -569,6 +612,45 @@ function boot(PINS) {
   build();
   startLoop();
   start();
+
+  // The native saver host drives frames directly (30fps from ScreenSaverView's
+  // animateOneFrame): rAF and DOM timers can be throttled or fully suspended
+  // inside the sandboxed screensaver appex. This call also kicks the entrance
+  // reveal if the page's own timers never fired.
+  let extFrames = 0, revealKicked = false, auditAt = 90;
+  // ASSIST mode only — the native host calls this after MEASURING that the
+  // page's own rAF loop is dead (window.__beats not advancing). Transitions
+  // can't run without frames, so paint every tile instantly. When rAF is
+  // healthy this is never called and the normal bottom-bloom entrance plays,
+  // exactly like the original WebViewScreenSaver setup.
+  window.pinwallRevealNow = function () {
+    started = true; revealKicked = true;
+    viewport.querySelectorAll('img').forEach(img => img.classList.add('instant'));
+    remeasure();
+  };
+  window.pinwallFrame = function (now) {
+    extFrames++;
+    if (!revealKicked && extFrames > 30) window.pinwallRevealNow();   // ~1s fallback
+    // remeasure columns while images stream in — the page's own debounce timer
+    // is frozen in the saver host, so loop heights would otherwise go stale
+    if (extFrames === 30 || extFrames === 90 || extFrames === 300) remeasure();
+    // Opacity audit (~every 3s): CSS transitions can be frozen in the saver
+    // host, leaving tiles classed .show but painted invisible. Force-paint any
+    // loaded tile whose ACTUAL opacity is stuck low.
+    if (extFrames === auditAt) {
+      auditAt += 90;
+      viewport.querySelectorAll('img').forEach(img => {
+        if (img.complete && img.naturalHeight > 0 &&
+            parseFloat(getComputedStyle(img).opacity) < 0.9) img.classList.add('instant');
+      });
+    }
+    // clock repaint (~1/s): DOM timers are suspended in the saver host too
+    if (extFrames % 30 === 0 && window.pinwallClockTick) window.pinwallClockTick();
+    frame(typeof now === 'number' ? now : performance.now());
+  };
+  // last-resort visibility: if nothing ever revealed, force the tiles on
+  setTimeout(() => viewport.querySelectorAll('img:not(.show):not(.instant)')
+    .forEach(i => i.classList.add('instant')), startDelay + 4000);
 
   // ---- skeleton (native, logged in but no pins yet) ----
   function renderSkeleton() {

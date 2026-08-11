@@ -14,7 +14,7 @@ settings:
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_HARDENED_RUNTIME: YES
-    COMBINE_HIDPI_IMAGES: YES
+    COMBINE_HIDPI_IMAGES: NO
 
 targets:
   # ---- The app: settings UI + preview + installer + updater + harvester ----
@@ -65,6 +65,8 @@ targets:
       - path: Sources/PinWallSaver
       - path: Sources/Shared
       - path: Resources/web
+        buildPhase: resources
+      - path: Resources/thumbnail.png
         buildPhase: resources
     settings:
       base:

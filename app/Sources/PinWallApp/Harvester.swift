@@ -10,6 +10,14 @@ enum Harvester {
         let settings = WallSettings.load()
         if !settings.connected { log("not connected — skipping"); exit(0) }
         if settings.chargerOnly && onBatteryPower() { log("on battery + charger-only — skipping"); exit(0) }
+        // Jitter: never fetch on a robotic clock grid — exact intervals are a
+        // classic bot fingerprint. Same trick as the original Python harvester:
+        // launchd fires on the interval, we sleep a random 0–40% of it first,
+        // so a 30-min slot lands at ~30–42 min gaps that drift every cycle.
+        let jitter = Double.random(in: 0...(settings.refreshMins * 60 * 0.4))
+        log(String(format: "jitter: sleeping %.1f min before fetch", jitter / 60))
+        Thread.sleep(forTimeInterval: jitter)
+        if settings.chargerOnly && onBatteryPower() { log("went on battery during jitter — skipping"); exit(0) }
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)   // no dock icon, no menu bar
@@ -47,8 +55,10 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // hard timeout so a hung scrape can't leave the process alive forever
-        DispatchQueue.main.asyncAfter(deadline: .now() + 180) {
-            Harvester.log("timed out after 180s"); exit(2)
+        // (scaled: 300 pins needs many more scroll rounds than 100)
+        let timeout = max(300.0, WallSettings.load().pinTarget * 2.5)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            Harvester.log("timed out after \(Int(timeout))s"); exit(2)
         }
 
         let frame = NSRect(x: -20_000, y: -20_000, width: 1400, height: 900)
@@ -62,9 +72,12 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
 
         let scraper = PinterestScraper(web: web)
         self.scraper = scraper
-        let source = WallSettings.load().source
+        let settings = WallSettings.load()
         Task { @MainActor in
-            let (pins, loggedIn) = await scraper.run(sourceURL: FeedSource.url(for: source), needsLoad: true)
+            let (pins, loggedIn) = await scraper.run(sourceURL: FeedSource.url(for: settings.source),
+                                                     target: Int(settings.pinTarget),
+                                                     maxScrolls: max(60, Int(settings.pinTarget)),
+                                                     needsLoad: true)
             if loggedIn && pins.count >= PinterestScraper.minPins {
                 PinStore.save(pins)
                 Harvester.log("harvested \(pins.count) pins")

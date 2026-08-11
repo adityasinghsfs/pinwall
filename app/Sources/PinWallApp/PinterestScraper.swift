@@ -31,8 +31,11 @@ final class PinterestScraper: NSObject {
                 }
             }
             if pairs.count >= target { break }
-            _ = await evalJS("window.scrollTo(0, (window.scrollY||0) + 2200); 1;")
-            await sleep(1.2)
+            // human-ish scrolling: vary both distance and dwell time — fixed
+            // 2200px/1.2s steps are as much a bot fingerprint as fixed intervals
+            let dist = Int.random(in: 1600...2800)
+            _ = await evalJS("window.scrollTo(0, (window.scrollY||0) + \(dist)); 1;")
+            await sleep(Double.random(in: 0.8...1.9))
         }
         return (Array(pairs.prefix(target)), pairs.count >= Self.minPins)
     }

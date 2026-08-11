@@ -25,8 +25,11 @@ enum AppHarvest {
 
         let s = PinterestScraper(web: web)
         scraper = s
+        let target = Int(WallSettings.load().pinTarget)
         Task { @MainActor in
-            let (pins, loggedIn) = await s.run(sourceURL: FeedSource.url(for: source), needsLoad: true)
+            let (pins, loggedIn) = await s.run(sourceURL: FeedSource.url(for: source),
+                                               target: target, maxScrolls: max(60, target),
+                                               needsLoad: true)
             if loggedIn && pins.count >= PinterestScraper.minPins { PinStore.save(pins) }
             cleanup()
             completion(pins.count)

@@ -13,7 +13,9 @@ public enum PinWall {
     /// GitHub repo the updater and (optionally) a curated feed come from.
     public static let repo = "adityasinghsfs/pinwall"
 
-    /// Shared support dir readable by the app and the screensaver host.
+    /// Support dir as resolved for THIS process. NOTE: inside the sandboxed
+    /// screensaver host (legacyScreenSaver.appex) this resolves into the appex's
+    /// CONTAINER, not the user's real home — fine for logs, useless for sharing.
     public static var supportDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = base.appendingPathComponent("PinWall", isDirectory: true)
@@ -22,6 +24,57 @@ public enum PinWall {
     }
     public static var pinsFile: URL { supportDir.appendingPathComponent("pins.json") }
     public static var logFile: URL { supportDir.appendingPathComponent("harvest.log") }
+
+    /// True when this process runs inside an app-sandbox container (the
+    /// legacyScreenSaver appex that hosts third-party savers on macOS 14+).
+    public static var inSandboxContainer: Bool {
+        NSHomeDirectory().contains("/Library/Containers/")
+    }
+
+    /// The user's REAL home, even from inside a sandbox container (where
+    /// NSHomeDirectory() lies). getpwuid reports the account's actual home.
+    public static var realHomeDir: URL {
+        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
+            return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// Where the app PUBLISHES the wall for the sandboxed screensaver:
+    /// plain files in the real home (pinwall.html + pins.js + settings.js).
+    /// The appex can't see our UserDefaults or per-process Application Support
+    /// (it has its own container), but it holds a read-only exception for the
+    /// whole disk — so a file:// page with sibling .js data files is the one
+    /// data path PROVEN to work there (it's how WebViewScreenSaver ran for months).
+    public static var saverWebDir: URL {
+        realHomeDir.appendingPathComponent("Library/Application Support/PinWall/web", isDirectory: true)
+    }
+
+    /// Regenerate the published mirror. Called by the app on launch and after
+    /// every settings/pins change. No-op inside the sandboxed saver.
+    public static func publishSaverMirror() {
+        guard !inSandboxContainer else { return }
+        let fm = FileManager.default
+        let dir = saverWebDir
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let src = Bundle.main.url(forResource: "pinwall", withExtension: "html", subdirectory: "web")
+            ?? Bundle.main.url(forResource: "pinwall", withExtension: "html"),
+           let html = try? Data(contentsOf: src) {
+            try? html.write(to: dir.appendingPathComponent("pinwall.html"), options: .atomic)
+        }
+        let settings = WallSettings.load()
+        let pins = PinStore.load()
+        let cfg = "window.PINWALL_CONFIG = "
+            + settings.configJSON(gallery: false, skeleton: settings.connected, app: false, reload: true)
+            + ";\n"
+        try? cfg.data(using: .utf8)?.write(to: dir.appendingPathComponent("settings.js"), options: .atomic)
+        let pjs = "window.PINS = " + PinStore.pinsJSON(pins) + ";\n"
+        try? pjs.data(using: .utf8)?.write(to: dir.appendingPathComponent("pins.js"), options: .atomic)
+        // where the saver's "Options…" button finds the app (UserDefaults is
+        // container-isolated in the appex, so this travels as a file too)
+        try? Bundle.main.bundlePath.data(using: .utf8)?
+            .write(to: dir.appendingPathComponent("apppath.txt"), options: .atomic)
+    }
 }
 
 /// One pin: the image URL plus the Pinterest link it opens in gallery mode.
@@ -39,6 +92,14 @@ public enum PinStore {
     public static func save(_ pins: [Pin]) {
         guard let data = try? JSONEncoder().encode(pins) else { return }
         try? data.write(to: PinWall.pinsFile, options: .atomic)
+        UserDefaults(suiteName: PinWall.suiteName)?
+            .set(Date().timeIntervalSince1970, forKey: "lastRefresh")
+        PinWall.publishSaverMirror()   // keep the screensaver's file mirror fresh
+    }
+    /// When the feed was last successfully refreshed (nil = never).
+    public static var lastRefresh: Date? {
+        let t = UserDefaults(suiteName: PinWall.suiteName)?.double(forKey: "lastRefresh") ?? 0
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
     }
     /// JSON array literal for injecting into the page as `window.PINS`.
     public static func pinsJSON(_ pins: [Pin]) -> String {
@@ -94,7 +155,9 @@ public struct WallSettings: Equatable {
     public var clockWeight: Double // time font weight (100–900)
     public var clockGlass: Bool    // frosted glass panel behind the clock
     public var clockColor: String  // hex "#RRGGBB"
-    public var chargerOnly: Bool   // "Start only on charger": skip harvest on battery
+    public var chargerOnly: Bool   // "Refresh only on charger": skip harvest on battery
+    public var refreshMins: Double // feed refresh interval in minutes (LaunchAgent)
+    public var pinTarget: Double   // how many pins each refresh collects
     public var connected: Bool     // has the user connected their Pinterest?
     public var source: String      // "feed" or a board URL to harvest from
 
@@ -102,13 +165,16 @@ public struct WallSettings: Equatable {
                 columns: Double, topBlur: Double, chroma: Double,
                 clock: Bool, clockPos: String, clockSize: Double, clockDate: Bool,
                 clockFont: String, clockWeight: Double, clockGlass: Bool, clockColor: String,
-                chargerOnly: Bool, connected: Bool, source: String) {
+                chargerOnly: Bool, refreshMins: Double = 60, pinTarget: Double = 100,
+                connected: Bool, source: String) {
         self.speed = speed; self.fade = fade; self.rise = rise; self.stagger = stagger
         self.columns = columns; self.topBlur = topBlur; self.chroma = chroma
         self.clock = clock; self.clockPos = clockPos; self.clockSize = clockSize; self.clockDate = clockDate
         self.clockFont = clockFont; self.clockWeight = clockWeight
         self.clockGlass = clockGlass; self.clockColor = clockColor
-        self.chargerOnly = chargerOnly; self.connected = connected
+        self.chargerOnly = chargerOnly
+        self.refreshMins = refreshMins; self.pinTarget = pinTarget
+        self.connected = connected
         self.source = source
     }
 
@@ -130,7 +196,7 @@ public struct WallSettings: Equatable {
         topBlur = 0; chroma = 0
         clockPos = "tc"; clockSize = 100; clockDate = true
         clockFont = "system"; clockWeight = 200; clockGlass = false; clockColor = "#FFFFFF"
-        chargerOnly = false
+        chargerOnly = false; refreshMins = 60; pinTarget = 100
     }
 
     private static var store: UserDefaults { UserDefaults(suiteName: PinWall.suiteName) ?? .standard }
@@ -152,6 +218,7 @@ public struct WallSettings: Equatable {
             clockGlass: d.bool(forKey: "clockGlass"),
             clockColor: d.string(forKey: "clockColor") ?? "#FFFFFF",
             chargerOnly: d.bool(forKey: "chargerOnly"),
+            refreshMins: dbl("refreshMins", 60), pinTarget: dbl("pinTarget", 100),
             connected: d.bool(forKey: "connected"),
             source: d.string(forKey: "source") ?? FeedSource.feed)
     }
@@ -165,19 +232,24 @@ public struct WallSettings: Equatable {
         d.set(clockSize, forKey: "clockSize"); d.set(clockDate, forKey: "clockDate")
         d.set(clockFont, forKey: "clockFont"); d.set(clockWeight, forKey: "clockWeight")
         d.set(clockGlass, forKey: "clockGlass"); d.set(clockColor, forKey: "clockColor")
-        d.set(chargerOnly, forKey: "chargerOnly"); d.set(connected, forKey: "connected")
+        d.set(chargerOnly, forKey: "chargerOnly")
+        d.set(refreshMins, forKey: "refreshMins"); d.set(pinTarget, forKey: "pinTarget")
+        d.set(connected, forKey: "connected")
         d.set(source, forKey: "source")
+        PinWall.publishSaverMirror()   // keep the screensaver's file mirror fresh
     }
     /// Object literal for injecting into the page as `window.PINWALL_CONFIG`.
     /// `app` = running inside PinWall.app (keep the cursor visible); the
     /// screensaver passes false so the cursor stays hidden while it's showing.
-    public func configJSON(gallery: Bool, skeleton: Bool, app: Bool, hideWall: Bool = false) -> String {
+    public func configJSON(gallery: Bool, skeleton: Bool, app: Bool,
+                           hideWall: Bool = false, reload: Bool = false) -> String {
         "{ \"speed\": \(speed), \"fade\": \(fade), \"rise\": \(rise), \"stagger\": \(stagger), " +
         "\"columns\": \(columns), \"clock\": \(clock), \"clockPos\": \"\(clockPos)\", " +
         "\"clockSize\": \(clockSize), \"clockDate\": \(clockDate), " +
         "\"clockFont\": \"\(clockFont)\", \"clockWeight\": \(clockWeight), " +
         "\"clockGlass\": \(clockGlass), \"clockColor\": \"\(clockColor)\", " +
-        "\"gallery\": \(gallery), \"skeleton\": \(skeleton), \"app\": \(app), \"hideWall\": \(hideWall) }"
+        "\"gallery\": \(gallery), \"skeleton\": \(skeleton), \"app\": \(app), " +
+        "\"hideWall\": \(hideWall), \"reload\": \(reload) }"
     }
 }
 

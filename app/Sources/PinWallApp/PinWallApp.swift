@@ -39,6 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        // Record our path so the screensaver's "Configure" button can open us.
+        UserDefaults(suiteName: PinWall.suiteName)?.set(Bundle.main.bundlePath, forKey: "appPath")
+        // Publish the wall (html + pins + settings as plain files in the real
+        // home) for the sandboxed screensaver, which can't read our defaults.
+        PinWall.publishSaverMirror()
+        // Self-heal the harvest LaunchAgent: re-point it at THIS binary. A stale
+        // agent aimed at a deleted/older build crash-loops at launch instead of
+        // refreshing the feed.
+        if WallSettings.load().connected { Installer.installHarvestAgent() }
         // Check GitHub for a newer release shortly after launch (Phase 4).
         Updater.shared.checkOnLaunch()
     }

@@ -22,12 +22,12 @@ struct RootView: View {
                         reloadToken: reloadToken, replayToken: replayToken)
                 .ignoresSafeArea()
 
-            // subtle left-edge darkening so the glass panel always reads
+            // subtle right-edge darkening so the glass panel always reads
             if showPanel && !browseMode {
-                LinearGradient(colors: [.black.opacity(0.45), .clear],
+                LinearGradient(colors: [.clear, .black.opacity(0.45)],
                                startPoint: .leading, endPoint: .trailing)
                     .frame(width: 420)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
                     .transition(.opacity)
@@ -37,16 +37,18 @@ struct RootView: View {
                 settingsPanel
                     .frame(width: 320)
                     .frame(maxHeight: .infinity, alignment: .top)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 20)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.trailing, 20)
                     .padding(.top, 44)
                     .padding(.bottom, 20)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
             if !browseMode {
+                // buttons slide left out of the panel's way when it's open
                 floatingButtons
-                    .padding(20)
+                    .padding(.trailing, showPanel ? 356 : 20)
+                    .padding(.bottom, 20)
             }
 
             if browseMode {
@@ -129,15 +131,36 @@ struct RootView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "square.grid.3x3.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.pink)
-            Text("PinWall")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-            Spacer()
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Image(systemName: "square.grid.3x3.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.pink)
+                Text("PinWall")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Spacer()
+            }
+            Text(lastRefreshedText)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.5))
+                .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { t in
+                    clockTick = t   // re-render so "X minutes ago" stays current
+                }
         }
+    }
+
+    @State private var clockTick = Date()
+
+    private var lastRefreshedText: String {
+        _ = clockTick
+        guard let last = PinStore.lastRefresh else { return "Feed not refreshed yet" }
+        let mins = Int(Date().timeIntervalSince(last) / 60)
+        if mins < 1 { return "Last refreshed just now" }
+        if mins < 60 { return "Last refreshed \(mins) min ago" }
+        let h = mins / 60
+        return h < 24 ? "Last refreshed \(h)h \(mins % 60)m ago"
+                      : "Last refreshed \(h / 24)d ago"
     }
 
     private var connectionSection: some View {
@@ -340,12 +363,35 @@ struct RootView: View {
         }
     }
 
+    private var refreshBinding: Binding<Double> {
+        Binding(get: { settings.refreshMins },
+                set: { settings.refreshMins = $0; settings.save()
+                       if settings.connected { Installer.installHarvestAgent() } })
+    }
+
     private var behaviourSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("BEHAVIOUR")
+            sectionLabel("FEED REFRESH")
+            pickerRow("Refresh every", selection: refreshBinding) {
+                Text("30 min").tag(30.0)
+                Text("1 hour").tag(60.0)
+                Text("3 hours").tag(180.0)
+                Text("6 hours").tag(360.0)
+                Text("Once a day").tag(1440.0)
+            }
+            slider("Pins per refresh", value: $settings.pinTarget, range: 100...300, unit: "", step: 20)
             toggleRow("Refresh only on charger", "Skip refreshing your feed while on battery",
                       isOn: $settings.chargerOnly)
                 .onChange(of: settings.chargerOnly) { _ in settings.save() }
+            Button {
+                refreshSource()
+            } label: {
+                Label(refreshing ? "Refreshing…" : "Refresh feed now",
+                      systemImage: "arrow.clockwise")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(GlassButtonStyle(tint: .white.opacity(0.16)))
+            .disabled(refreshing || !settings.connected)
         }
     }
 

@@ -49,6 +49,7 @@ enum Installer {
         try? FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
         let plistURL = agents.appendingPathComponent("\(label).plist")
         let log = PinWall.logFile.path
+        let interval = max(900, Int(WallSettings.load().refreshMins * 60))   // floor: 15 min
         let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -60,8 +61,10 @@ enum Installer {
             <string>\(exec)</string>
             <string>--harvest</string>
           </array>
-          <key>StartInterval</key><integer>3600</integer>
-          <key>RunAtLoad</key><true/>
+          <key>StartInterval</key><integer>\(interval)</integer>
+          <!-- interval-only: RunAtLoad would spawn a harvest the moment the app
+               (re)installs the agent — including while the screensaver is up -->
+          <key>RunAtLoad</key><false/>
           <key>StandardOutPath</key><string>\(log)</string>
           <key>StandardErrorPath</key><string>\(log)</string>
         </dict>
@@ -101,9 +104,13 @@ enum Installer {
     }
 
     static func openScreenSaverSettings() {
+        // On macOS 14–26 the Screen Saver picker lives inside the Wallpaper pane
+        // (there's no standalone ScreenSaver-Settings extension anymore). Opening
+        // the Wallpaper pane drops the user right at the Screen Saver section.
         let candidates = [
-            "x-apple.systempreferences:com.apple.ScreenSaver-Settings.extension", // Ventura+
-            "x-apple.systempreferences:com.apple.preference.desktopscreeneffect"  // older
+            "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension",   // macOS 14–26
+            "x-apple.systempreferences:com.apple.ScreenSaver-Settings.extension", // older
+            "x-apple.systempreferences:com.apple.preference.desktopscreeneffect"  // legacy
         ]
         for c in candidates {
             if let url = URL(string: c), NSWorkspace.shared.open(url) { return }
