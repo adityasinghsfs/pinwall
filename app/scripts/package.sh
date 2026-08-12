@@ -86,4 +86,11 @@ else
   echo "==> Skipped notarization (no Developer ID cert). See scripts/NOTARIZE.md"
 fi
 
+# --- brand the .dmg file's Finder icon (metadata only — safe after stapling) --
+if [ -f "Resources/AppIcon.icns" ]; then
+  swift scripts/set-dmg-icon.swift "Resources/AppIcon.icns" "$DMG" \
+    && echo "    dmg icon set" \
+    && xcrun stapler validate "$DMG" >/dev/null 2>&1 && echo "    staple still valid"
+fi
+
 echo "DONE → $DMG"
