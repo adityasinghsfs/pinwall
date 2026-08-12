@@ -27,7 +27,9 @@ final class PinterestScraper: NSObject {
         let auth = await authState()
         var seen = Set<String>()
         var pairs: [Pin] = []
+        var stagnant = 0
         for _ in 0..<maxScrolls {
+            let before = pairs.count
             for it in await scrapeOnce() {
                 guard isPin(it.img) else { continue }
                 let u = upsize(it.img)
@@ -36,6 +38,16 @@ final class PinterestScraper: NSObject {
                 }
             }
             if pairs.count >= target { break }
+            // Stop when the source is EXHAUSTED: a board usually has far fewer
+            // pins than the target, so without this the scrape grinds the full
+            // maxScrolls (minutes) and times out the in-app refresh. Bail after
+            // a few consecutive scrolls that surface no new pins.
+            if pairs.count == before {
+                stagnant += 1
+                if stagnant >= 4 { break }
+            } else {
+                stagnant = 0
+            }
             // human-ish scrolling: vary both distance and dwell time — fixed
             // 2200px/1.2s steps are as much a bot fingerprint as fixed intervals
             let dist = Int.random(in: 1600...2800)

@@ -26,7 +26,9 @@ enum AppHarvest {
             let (pins, loggedIn) = await s.run(sourceURL: FeedSource.url(for: source),
                                                target: target, maxScrolls: max(60, target),
                                                needsLoad: true)
-            if loggedIn && pins.count >= PinterestScraper.minPins { PinStore.save(pins) }
+            // User explicitly chose this source — save whatever real pins it has
+            // (a small board is valid), as long as we're genuinely logged in.
+            if loggedIn && !pins.isEmpty { PinStore.save(pins) }
             done { completion(pins.count) }
         }
     }

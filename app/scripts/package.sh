@@ -67,13 +67,21 @@ hdiutil create -volname "$APP" -srcfolder "$DIST/stage" -ov -format UDZO "$DMG" 
 rm -rf "$DIST/stage"
 echo "    $DMG"
 
-# --- notarize (only with a Developer ID cert + stored profile) --------------
+# --- notarize (needs a Developer ID cert AND stored notary credentials) -----
 if [ "$NOTARIZE" = "1" ]; then
-  echo "==> Notarizing (profile: $NOTARY_PROFILE)…"
-  codesign "${SIGN[@]}" "$DMG"
-  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$DMG"
-  xcrun stapler validate "$DMG" && echo "    notarized + stapled ✓"
+  if xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+    echo "==> Notarizing (profile: $NOTARY_PROFILE)…"
+    codesign "${SIGN[@]}" "$DMG"
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG" && echo "    notarized + stapled ✓"
+  else
+    codesign "${SIGN[@]}" "$DMG"
+    echo "==> Signed with Developer ID, but no notary profile '$NOTARY_PROFILE' found."
+    echo "    To notarize, run once (your password goes into the keychain):"
+    echo "    xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <apple-id> --team-id <team-id> --password <app-specific-pw>"
+    echo "    then re-run this script."
+  fi
 else
   echo "==> Skipped notarization (no Developer ID cert). See scripts/NOTARIZE.md"
 fi
