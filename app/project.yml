@@ -66,8 +66,17 @@ targets:
       - path: Sources/Shared
       - path: Resources/web
         buildPhase: resources
-      - path: Resources/thumbnail.png
-        buildPhase: resources
+    postBuildScripts:
+      # Copy thumbnails VERBATIM — the resources phase "combines" the png/@2x
+      # pair into thumbnail.tiff, which the screensaver picker ignores.
+      - name: Copy saver thumbnails
+        script: |
+          set -e
+          DEST="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          mkdir -p "$DEST"
+          cp "${SRCROOT}/Resources/thumbnail.png" "$DEST/thumbnail.png"
+          cp "${SRCROOT}/Resources/thumbnail@2x.png" "$DEST/thumbnail@2x.png"
+          cp "${SRCROOT}/Resources/thumbnail.tiff" "$DEST/thumbnail.tiff"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: work.adityasingh.pinwall.saver

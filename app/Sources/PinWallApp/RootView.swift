@@ -22,6 +22,12 @@ struct RootView: View {
                         reloadToken: reloadToken, replayToken: replayToken)
                 .ignoresSafeArea()
 
+            // slim glass top bar: grab anywhere on it to move the window
+            // (the wall's webview eats drags, so the window was un-draggable)
+            dragBar
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .ignoresSafeArea()
+
             // subtle right-edge darkening so the glass panel always reads
             if showPanel && !browseMode {
                 LinearGradient(colors: [.clear, .black.opacity(0.45)],
@@ -472,6 +478,29 @@ struct RootView: View {
         }
     }
 
+    // MARK: - Top drag bar
+
+    private var dragBar: some View {
+        ZStack {
+            WindowDragArea()
+            HStack(spacing: 7) {
+                Image(systemName: "square.grid.3x3.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.pink)
+                Text("PinWall")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .allowsHitTesting(false)   // let drags fall through to the drag area
+        }
+        .frame(height: 38)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle().frame(height: 1).foregroundStyle(.white.opacity(0.08))
+        }
+        .environment(\.colorScheme, .dark)
+    }
+
     // MARK: - Floating buttons (bottom-right)
 
     private var floatingButtons: some View {
@@ -539,6 +568,18 @@ struct RootView: View {
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
     }
+}
+
+/// Transparent AppKit view that turns any mouse-down into a window drag —
+/// needed because the WKWebView underneath swallows SwiftUI drag gestures.
+struct WindowDragArea: NSViewRepresentable {
+    final class DragView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+    }
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 extension Color {
