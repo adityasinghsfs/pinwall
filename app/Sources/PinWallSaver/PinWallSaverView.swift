@@ -18,6 +18,10 @@ import WebKit
 final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
     private var web: WKWebView!
     private var loaded = false
+    private var occlusionEnabled = true               // WKWebView default
+    private var occlusionWatchdog: Timer?
+    private var termTimes: [Date] = []                // recent WebContent kills
+    private var heartbeatChecks = 0
 
     override init?(frame: NSRect, isPreview: Bool) {
         super.init(frame: frame, isPreview: isPreview)
@@ -42,8 +46,17 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
         setOcclusionDetection(web, enabled: false)   // BEFORE addSubview, like WVSS
         addSubview(web)
         self.web = web
+        // Belt-and-braces: legacyScreenSaver often never delivers stopAnimation,
+        // so a lingering-but-hidden host would keep compositing forever (battery
+        // leak). Re-enable occlusion detection whenever we're not actually shown.
+        occlusionWatchdog = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            guard let self, let web = self.web else { return }
+            self.setOcclusionDetection(web, enabled: !self.isOnScreen)
+        }
         slog("init \(Int(bounds.width))x\(Int(bounds.height)) preview=\(isPreview) home=\(NSHomeDirectory())")
     }
+
+    private var isOnScreen: Bool { window != nil && (window?.isVisible ?? false) }
 
     /// THE fix that made WebViewScreenSaver work on Sonoma+ (this exact wall ran
     /// on it for months): the screensaver appex's remote-hosted window reports
@@ -53,11 +66,13 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
     /// always-visible. We re-enable it in stopAnimation so a leaked host can't
     /// burn CPU animating an invisible wall (the old WVSS battery bug).
     private func setOcclusionDetection(_ webView: WKWebView, enabled: Bool) {
+        if occlusionEnabled == enabled { return }   // no-op + no log spam when unchanged
         let sel = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
         guard webView.responds(to: sel) else { slog("occlusion SPI MISSING — relying on native assist"); return }
         typealias SetBoolIMP = @convention(c) (AnyObject, Selector, Bool) -> Void
         let imp = webView.method(for: sel)
         unsafeBitCast(imp, to: SetBoolIMP.self)(webView, sel, enabled)
+        occlusionEnabled = enabled
         slog("occlusionDetection=\(enabled ? "on" : "OFF")")
     }
 
@@ -72,17 +87,25 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
             web.loadFileURL(mirror, allowingReadAccessTo: mirror.deletingLastPathComponent())
             return
         }
-        // Mirror missing (app never launched on this account) or its load
-        // failed — fall back to the bundled page; it shows the demo wall.
-        slog("loadWall FALLBACK: using bundled html (usedFallback=\(usedFallback))")
+        // Mirror missing (app never launched here / translocated) — fall back to
+        // the bundled page. In the appex the container has no pins, so this shows
+        // the SKELETON, never internet picsum images on someone's lock screen.
+        slog("loadWall FALLBACK: bundled html (usedFallback=\(usedFallback))")
+        loadBundled(skeleton: true)
+    }
+
+    /// Load the bundled page. skeleton:true = shimmer placeholder, no images and
+    /// no network — used as the offline/not-set-up and kill-loop safe state.
+    private func loadBundled(skeleton: Bool) {
+        guard let web else { return }
         let b = Bundle(for: PinWallSaverView.self)
         guard let html = b.url(forResource: "pinwall", withExtension: "html", subdirectory: "web")
                 ?? b.url(forResource: "pinwall", withExtension: "html"),
               let s = try? String(contentsOf: html, encoding: .utf8) else {
-            slog("loadWall: bundled html missing"); return
+            slog("loadBundled: bundled html missing"); return
         }
-        let js = pinwallBootstrapJS(pins: PinStore.load(), settings: WallSettings.load(),
-                                    gallery: false, skeleton: false, app: false)
+        let js = pinwallBootstrapJS(pins: [], settings: WallSettings.load(),
+                                    gallery: false, skeleton: skeleton, app: false)
         web.configuration.userContentController.removeAllUserScripts()
         web.configuration.userContentController.addUserScript(
             WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -107,12 +130,15 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
         if let web { setOcclusionDetection(web, enabled: true) }
     }
 
-    // lifecycle diagnostics: WHO is tearing us down, and when
+    // lifecycle: re-enable occlusion detection the moment we're detached so a
+    // hidden-but-alive host suspends the page instead of animating it forever.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if let web { setOcclusionDetection(web, enabled: !isOnScreen) }
         slog("viewDidMoveToWindow window=\(window != nil ? "attached" : "DETACHED")")
     }
     deinit {
+        occlusionWatchdog?.invalidate()
         NSLog("PinWallSaver: deinit")
     }
 
@@ -138,9 +164,9 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         slog("didFinish")
-        // Give the page's own rAF loop a moment, then measure it. If it beats,
-        // do NOTHING — the original bottom-bloom entrance plays exactly like the
-        // old WebViewScreenSaver setup. Only a dead loop gets native assistance.
+        // Fresh measurement per navigation (the page self-reloads hourly when the
+        // feed changes) — don't let a stale assist verdict kill later blooms.
+        assist = false; heartbeatRetried = false; heartbeatChecks = 0
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.checkHeartbeat() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in self?.probe() }
     }
@@ -148,16 +174,21 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
     private var heartbeatRetried = false
 
     private func checkHeartbeat() {
-        web.evaluateJavaScript("window.__beats || 0") { [weak self] result, _ in
+        heartbeatChecks += 1
+        guard heartbeatChecks <= 6 else { return }   // don't poll forever
+        web.evaluateJavaScript("window.__beats || 0") { [weak self] result, error in
             guard let self else { return }
+            if error != nil || result == nil {
+                // page mid-navigation / just crashed — inconclusive, re-check
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.checkHeartbeat() }
+                return
+            }
             let beats = (result as? Int) ?? Int((result as? Double) ?? 0)
             if beats >= 5 {
-                self.slog("rAF healthy (beats=\(beats)) — no assist, bloom entrance plays")
+                self.slog("rAF healthy (beats=\(beats)) — bloom entrance plays")
             } else if !self.heartbeatRetried {
-                // The window may still be fading in — rAF can start late. Don't
-                // steal the bloom with assist on a premature verdict.
                 self.heartbeatRetried = true
-                self.slog("rAF quiet (beats=\(beats)) — rechecking in 3s")
+                self.slog("rAF quiet (beats=\(beats)) — rechecking")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkHeartbeat() }
             } else {
                 self.assist = true
@@ -168,10 +199,12 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
         }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }   // superseded load — benign
         slog("didFail: \(error.localizedDescription)")
         retryWithBundledPage()
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
         slog("didFailProvisional: \(error.localizedDescription)")
         retryWithBundledPage()
     }
@@ -181,10 +214,21 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
         loadWall()
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        // Reload NOW — startAnimation won't fire again mid-session, and a dead
-        // WebContent process would otherwise mean black until dismissal.
-        slog("WebContent TERMINATED — reloading")
-        loadWall()
+        let now = Date()
+        termTimes.append(now)
+        termTimes = termTimes.filter { now.timeIntervalSince($0) < 300 }   // last 5 min
+        slog("WebContent TERMINATED (\(termTimes.count) in 5m)")
+        if termTimes.count > 4 {
+            // memory-pressure kill loop — stop reloading the heavy image wall and
+            // sit on the lightweight, image-free skeleton instead.
+            slog("kill loop — loading skeleton")
+            loadBundled(skeleton: true)
+            return
+        }
+        // exponential backoff, and give the real mirror another chance
+        let delay = min(30.0, pow(2.0, Double(max(0, termTimes.count - 1))))
+        usedFallback = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.loadWall() }
     }
 
     /// Sample the page a few seconds after load: are pins present, images
@@ -243,15 +287,14 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
         let ts = ISO8601DateFormatter().string(from: Date())
         let line = "\(ts) [\(isPreview ? "preview" : "screen")] \(msg)\n"
         let url = PinWall.supportDir.appendingPathComponent("saver.log")
-        guard let data = line.data(using: .utf8) else { return }
-        // throwing FileHandle APIs only — the legacy ones raise ObjC exceptions
-        // that would crash the whole screensaver host on an I/O error
-        if let h = try? FileHandle(forWritingTo: url) {
-            _ = try? h.seekToEnd()
-            try? h.write(contentsOf: data)
-            try? h.close()
-        } else {
-            try? data.write(to: url)
+        // O_APPEND: atomic across the concurrent preview + screen processes that
+        // share this container, so their lines don't clobber each other.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int, size > 256_000 {
+            try? FileManager.default.removeItem(at: url)   // rotate
         }
+        guard let data = line.data(using: .utf8) else { return }
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        if fd >= 0 { data.withUnsafeBytes { _ = write(fd, $0.baseAddress, $0.count) }; close(fd) }
     }
 }

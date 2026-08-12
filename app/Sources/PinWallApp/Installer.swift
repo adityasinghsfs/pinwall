@@ -4,13 +4,34 @@ import AppKit
 /// Installs the bundled PinWall.saver into ~/Library/Screen Savers/ so it shows
 /// up by name in System Settings, then opens the Screen Saver settings pane.
 enum Installer {
+    static let agentLabel = "work.adityasingh.pinwall.harvest"
+
     static var installedURL: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Screen Savers/PinWall.saver")
     }
+    static var agentPlistURL: URL {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LaunchAgents/\(agentLabel).plist")
+    }
+
+    // MARK: - screensaver bundle
 
     @discardableResult
-    static func installSaver() -> String {
+    static func installSaver() -> String { copySaver(openSettings: true) }
+
+    /// Silent self-heal: if the installed saver is missing or a different version
+    /// than the one bundled in this app, re-copy it (no Settings pane). Ensures
+    /// screensaver bug/security fixes reach users when the APP updates.
+    static func syncSaverIfNeeded() {
+        guard let bundled = Bundle.main.url(forResource: "PinWall", withExtension: "saver") else { return }
+        let bv = version(of: bundled)
+        let iv = version(of: installedURL)
+        if iv == nil || iv != bv { _ = copySaver(openSettings: false) }
+    }
+
+    @discardableResult
+    private static func copySaver(openSettings: Bool) -> String {
         let fm = FileManager.default
         guard let src = Bundle.main.url(forResource: "PinWall", withExtension: "saver") else {
             return "Bundled screensaver not found inside the app."
@@ -23,11 +44,19 @@ enum Installer {
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
             try fm.copyItem(at: src, to: dest)
             stripQuarantine(dest)
-            openScreenSaverSettings()
+            if openSettings { openScreenSaverSettings() }
             return "Installed. Choose “PinWall” in System Settings → Screen Saver."
         } catch {
             return "Install failed: \(error.localizedDescription)"
         }
+    }
+
+    private static func version(of saver: URL) -> String? {
+        let info = saver.appendingPathComponent("Contents/Info.plist")
+        guard let d = NSDictionary(contentsOf: info) else { return nil }
+        let short = d["CFBundleShortVersionString"] as? String ?? ""
+        let build = d["CFBundleVersion"] as? String ?? ""
+        return short.isEmpty && build.isEmpty ? nil : short + "/" + build
     }
 
     private static func stripQuarantine(_ url: URL) {
@@ -37,17 +66,18 @@ enum Installer {
         try? p.run(); p.waitUntilExit()
     }
 
-    /// Installs a LaunchAgent that runs `PinWall --harvest` ~hourly (and at login)
-    /// to refresh the feed. Battery is handled inside the harvester via the
-    /// "Start only on charger" setting, mirroring the old launchd job.
+    // MARK: - harvest LaunchAgent
+
+    /// Installs a LaunchAgent that runs `PinWall --harvest` on the chosen interval.
+    /// Refuses when the app is App-Translocated (its executable path is ephemeral
+    /// and would vanish on DMG eject, permanently killing the refresh).
     @discardableResult
     static func installHarvestAgent() -> Bool {
+        guard !PinWall.isTranslocated else { return false }
         guard let exec = Bundle.main.executableURL?.path else { return false }
-        let label = "work.adityasingh.pinwall.harvest"
         let agents = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LaunchAgents", isDirectory: true)
         try? FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
-        let plistURL = agents.appendingPathComponent("\(label).plist")
         let log = PinWall.logFile.path
         let interval = max(900, Int(WallSettings.load().refreshMins * 60))   // floor: 15 min
         let plist = """
@@ -55,7 +85,7 @@ enum Installer {
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
-          <key>Label</key><string>\(label)</string>
+          <key>Label</key><string>\(agentLabel)</string>
           <key>ProgramArguments</key>
           <array>
             <string>\(exec)</string>
@@ -70,20 +100,17 @@ enum Installer {
         </dict>
         </plist>
         """
-        do {
-            try plist.write(to: plistURL, atomically: true, encoding: .utf8)
-        } catch { return false }
-        launchctl(["unload", plistURL.path])   // ignore failure (may not be loaded)
-        return launchctl(["load", "-w", plistURL.path])
+        do { try plist.write(to: agentPlistURL, atomically: true, encoding: .utf8) }
+        catch { Harvester.log("installHarvestAgent: write failed \(error.localizedDescription)"); return false }
+        launchctl(["unload", agentPlistURL.path])
+        let ok = launchctl(["load", "-w", agentPlistURL.path])
+        if !ok { Harvester.log("installHarvestAgent: launchctl load failed") }
+        return ok
     }
 
-    /// Stops and removes the harvest LaunchAgent (used on logout).
     static func removeHarvestAgent() {
-        let label = "work.adityasingh.pinwall.harvest"
-        let plistURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("LaunchAgents/\(label).plist")
-        launchctl(["unload", plistURL.path])
-        try? FileManager.default.removeItem(at: plistURL)
+        launchctl(["unload", agentPlistURL.path])
+        try? FileManager.default.removeItem(at: agentPlistURL)
     }
 
     @discardableResult
@@ -95,18 +122,27 @@ enum Installer {
         catch { return false }
     }
 
-    /// Starts the macOS screensaver full-screen (the system engine runs whichever
-    /// saver is currently selected — so install + select PinWall first for it to
-    /// show PinWall). Exits on mouse move / key press like a normal screensaver.
+    // MARK: - uninstall
+
+    /// Full removal: stop + delete the agent, delete the installed saver, and
+    /// wipe the published mirror + support dir. Leaves the .app for the user to
+    /// drag to Trash. (Also surfaced in the DMG's README.)
+    static func uninstall() {
+        removeHarvestAgent()
+        try? FileManager.default.removeItem(at: installedURL)
+        let support = PinWall.realHomeDir.appendingPathComponent("Library/Application Support/PinWall")
+        try? FileManager.default.removeItem(at: support)
+    }
+
+    // MARK: - screensaver launch / settings
+
     static func startScreenSaver() {
         let engine = URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
         NSWorkspace.shared.openApplication(at: engine, configuration: NSWorkspace.OpenConfiguration())
     }
 
     static func openScreenSaverSettings() {
-        // On macOS 14–26 the Screen Saver picker lives inside the Wallpaper pane
-        // (there's no standalone ScreenSaver-Settings extension anymore). Opening
-        // the Wallpaper pane drops the user right at the Screen Saver section.
+        // On macOS 14–26 the Screen Saver picker lives inside the Wallpaper pane.
         let candidates = [
             "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension",   // macOS 14–26
             "x-apple.systempreferences:com.apple.ScreenSaver-Settings.extension", // older

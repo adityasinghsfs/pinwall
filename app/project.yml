@@ -15,6 +15,8 @@ settings:
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_HARDENED_RUNTIME: YES
     COMBINE_HIDPI_IMAGES: NO
+    ARCHS: "arm64 x86_64"
+    ONLY_ACTIVE_ARCH: NO
 
 targets:
   # ---- The app: settings UI + preview + installer + updater + harvester ----

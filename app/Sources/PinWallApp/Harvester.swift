@@ -11,10 +11,10 @@ enum Harvester {
         if !settings.connected { log("not connected — skipping"); exit(0) }
         if settings.chargerOnly && onBatteryPower() { log("on battery + charger-only — skipping"); exit(0) }
         // Jitter: never fetch on a robotic clock grid — exact intervals are a
-        // classic bot fingerprint. Same trick as the original Python harvester:
-        // launchd fires on the interval, we sleep a random 0–40% of it first,
-        // so a 30-min slot lands at ~30–42 min gaps that drift every cycle.
-        let jitter = Double.random(in: 0...(settings.refreshMins * 60 * 0.4))
+        // classic bot fingerprint. Same trick as the original Python harvester.
+        // Clamp: a corrupt/negative refreshMins must not trap random(in:).
+        let cap = max(0, settings.refreshMins) * 60 * 0.4
+        let jitter = cap > 0 ? Double.random(in: 0...cap) : 0
         log(String(format: "jitter: sleeping %.1f min before fetch", jitter / 60))
         Thread.sleep(forTimeInterval: jitter)
         if settings.chargerOnly && onBatteryPower() { log("went on battery during jitter — skipping"); exit(0) }
@@ -29,15 +29,22 @@ enum Harvester {
     }
 
     static func log(_ message: String) {
+        rotateIfBig()
         let line = "\(isoNow()) \(message)\n"
-        if let data = line.data(using: .utf8) {
-            if let fh = try? FileHandle(forWritingTo: PinWall.logFile) {
-                fh.seekToEndOfFile(); fh.write(data); try? fh.close()
-            } else {
-                try? data.write(to: PinWall.logFile)
-            }
+        guard let data = line.data(using: .utf8) else { return }
+        // O_APPEND so concurrent processes don't clobber each other's lines,
+        // and we DON'T also write stderr (the LaunchAgent already redirects
+        // stderr to this same file — writing both double-logged every line).
+        let fd = open(PinWall.logFile.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        if fd >= 0 { data.withUnsafeBytes { _ = write(fd, $0.baseAddress, $0.count) }; close(fd) }
+    }
+
+    private static func rotateIfBig() {
+        let path = PinWall.logFile.path
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let size = attrs[.size] as? Int, size > 512_000 {
+            try? FileManager.default.removeItem(atPath: path)
         }
-        FileHandle.standardError.write(Data(line.utf8))
     }
 
     private static func isoNow() -> String {
@@ -54,11 +61,14 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
     private var scraper: PinterestScraper?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // one harvest machine-wide — don't collide with an in-app refresh over
+        // the shared cookie store.
+        guard HarvestLock.acquire() else { Harvester.log("another harvest holds the lock — skipping"); exit(0) }
+
         // hard timeout so a hung scrape can't leave the process alive forever
-        // (scaled: 300 pins needs many more scroll rounds than 100)
         let timeout = max(300.0, WallSettings.load().pinTarget * 2.5)
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-            Harvester.log("timed out after \(Int(timeout))s"); exit(2)
+            Harvester.log("timed out after \(Int(timeout))s"); HarvestLock.release(); exit(2)
         }
 
         let frame = NSRect(x: -20_000, y: -20_000, width: 1400, height: 900)
@@ -78,12 +88,16 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
                                                      target: Int(settings.pinTarget),
                                                      maxScrolls: max(60, Int(settings.pinTarget)),
                                                      needsLoad: true)
-            if loggedIn && pins.count >= PinterestScraper.minPins {
+            let saved = loggedIn && pins.count >= PinterestScraper.minPins
+            if saved {
                 PinStore.save(pins)
                 Harvester.log("harvested \(pins.count) pins")
             } else {
-                Harvester.log("only \(pins.count) pins / logged out — kept existing pins.json")
+                Harvester.log(loggedIn ? "only \(pins.count) pins — kept existing"
+                                       : "session looks logged out — kept existing, flagged reconnect")
             }
+            PinWall.recordHarvest(loggedIn: loggedIn, saved: saved)
+            HarvestLock.release()
             exit(0)
         }
     }

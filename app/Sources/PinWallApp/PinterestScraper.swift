@@ -6,20 +6,25 @@ import WebKit
 /// on any webview whose data store already holds the user's Pinterest cookies.
 @MainActor
 final class PinterestScraper: NSObject {
-    static let minPins = 15   // below this we assume logged-out/failed and don't overwrite
+    static let minPins = 15   // fewer than this and we won't OVERWRITE a good wall
 
     private let web: WKWebView
     private var loadWaiter: LoadWaiter?
 
     init(web: WKWebView) { self.web = web }
 
-    /// Returns the collected pins and whether we look logged in (enough pins).
+    /// Returns the collected pins and whether the session is actually logged in.
+    /// `loggedIn` is a POSITIVE auth signal (username resolves / no login CTA) —
+    /// NOT "we found ≥15 images", because logged-out Pinterest also shows a big
+    /// public grid. Callers must not overwrite a good wall unless loggedIn AND
+    /// pins.count >= minPins.
     func run(sourceURL: URL = URL(string: "https://www.pinterest.com/")!,
              target: Int = 100, maxScrolls: Int = 50, needsLoad: Bool) async -> (pins: [Pin], loggedIn: Bool) {
         if needsLoad {
             await load(sourceURL)
             await sleep(4.0)
         }
+        let auth = await authState()
         var seen = Set<String>()
         var pairs: [Pin] = []
         for _ in 0..<maxScrolls {
@@ -37,7 +42,37 @@ final class PinterestScraper: NSObject {
             _ = await evalJS("window.scrollTo(0, (window.scrollY||0) + \(dist)); 1;")
             await sleep(Double.random(in: 0.8...1.9))
         }
-        return (Array(pairs.prefix(target)), pairs.count >= Self.minPins)
+        return (Array(pairs.prefix(target)), auth.loggedIn)
+    }
+
+    // MARK: - auth detection (positive signal, not image count)
+
+    /// Best-effort login state + the logged-in username. Combines a session
+    /// cookie, a resolvable profile link, and the absence of login CTAs so a
+    /// logged-out public grid is not mistaken for a real feed, and a sparse but
+    /// genuine feed is not mistaken for logged-out.
+    func authState() async -> (loggedIn: Bool, username: String?) {
+        let js = #"""
+        (function(){
+          var reserved = {pin:1,search:1,ideas:1,settings:1,news:1,today:1,login:1,signup:1,business:1,all:1};
+          function findUser(){
+            var sels=['[data-test-id="header-profile"] a[href^="/"]','[data-test-id="user-profile-link"]','div[data-test-id="header-menu"] a[href^="/"]'];
+            for(var i=0;i<sels.length;i++){var a=document.querySelector(sels[i]);if(!a)continue;var m=(a.getAttribute('href')||'').match(/^\/([^\/]+)\/?$/);if(m&&m[1]&&m[1].charAt(0)!=='_'&&!reserved[m[1]])return m[1];}
+            var links=document.querySelectorAll('a[href^="/"]');
+            for(var j=0;j<links.length;j++){var mm=(links[j].getAttribute('href')||'').match(/^\/([^\/]+)\/?$/);if(mm&&mm[1]&&mm[1].charAt(0)!=='_'&&!reserved[mm[1]]&&(links[j].querySelector('img')||links[j].getAttribute('aria-label')))return mm[1];}
+            try{var s=document.getElementById('__PWS_DATA__');var t=s?s.textContent:'';var mj=t.match(/"username"\s*:\s*"([^"]+)"/);if(mj&&mj[1])return mj[1];}catch(e){}
+            return null;
+          }
+          var user=findUser();
+          var loginCTA=document.querySelector('[data-test-id="simple-login-button"],[data-test-id="login-button"],[data-test-id="signup-button"],[data-test-id="unauth-actions"]');
+          var onLoginPage=/^\/(login|signup)/.test(location.pathname||'');
+          return { user: user, loggedIn: (!!user || (!loginCTA && !onLoginPage)) };
+        })();
+        """#
+        if let d = await evalJS(js) as? [String: Any] {
+            return ((d["loggedIn"] as? Bool) ?? false, d["user"] as? String)
+        }
+        return (false, nil)
     }
 
     // MARK: - discover the user's boards (best-effort) for the source dropdown
@@ -45,22 +80,25 @@ final class PinterestScraper: NSObject {
     func discoverBoards() async -> [Board] {
         await load(URL(string: "https://www.pinterest.com/")!)
         await sleep(3.0)
-        guard let user = await currentUsername(), !user.isEmpty else { return [] }
+        guard let user = await authState().username, !user.isEmpty else { return [] }
         await load(URL(string: "https://www.pinterest.com/\(user)/_created/")!)
         await sleep(3.0)
         for _ in 0..<4 { _ = await evalJS("window.scrollTo(0,(window.scrollY||0)+1500);1;"); await sleep(0.8) }
+        // NOTE: select ALL root links and filter by regex — do NOT try to build a
+        // '/user/' attribute selector via string concat inside the JS literal
+        // (the old 'a[href^="/"+u+"/"]' was one literal string → SyntaxError →
+        // zero boards for everyone).
         let js = """
         (function(){
-          var u = \(jsString(user));
-          var re = new RegExp('^/' + u + '/([^/]+)/?$');
+          var re = new RegExp('^/' + \(jsString(user)) + '/([^/]+)/?$');
           var out = {};
-          Array.prototype.forEach.call(document.querySelectorAll('a[href^="/"+u+"/"]'), function(a){
+          Array.prototype.forEach.call(document.querySelectorAll('a[href^="/"]'), function(a){
             var href = a.getAttribute('href') || '';
             var m = href.match(re); if (!m) return;
             var slug = m[1];
             if (slug.charAt(0) === '_' || ['pins','boards','followers','following'].indexOf(slug) >= 0) return;
             var name = (a.getAttribute('aria-label') || a.textContent || slug).trim();
-            var full = 'https://www.pinterest.com/' + u + '/' + slug + '/';
+            var full = 'https://www.pinterest.com' + '/' + \(jsString(user)) + '/' + slug + '/';
             if (!out[full]) out[full] = name || slug;
           });
           return Object.keys(out).map(function(k){ return { url: k, name: out[k] }; });
@@ -71,38 +109,6 @@ final class PinterestScraper: NSObject {
             guard let url = d["url"] as? String else { return nil }
             return Board(name: (d["name"] as? String) ?? url, url: url)
         }
-    }
-
-    /// Best-effort logged-in username from the profile/avatar link in the header.
-    private func currentUsername() async -> String? {
-        let js = """
-        (function(){
-          var reserved = {pin:1,search:1,ideas:1,settings:1,news:1,today:1,login:1,business:1,all:1,'_':1};
-          var sels = ['[data-test-id="header-profile"] a[href^="/"]',
-                      '[data-test-id="user-profile-link"]',
-                      'div[data-test-id="header-menu"] a[href^="/"]'];
-          for (var i=0;i<sels.length;i++){
-            var a = document.querySelector(sels[i]); if(!a) continue;
-            var m = (a.getAttribute('href')||'').match(/^\\/([^\\/]+)\\/?$/);
-            if (m && m[1] && m[1].charAt(0)!=='_' && !reserved[m[1]]) return m[1];
-          }
-          var links = document.querySelectorAll('a[href^="/"]');
-          for (var j=0;j<links.length;j++){
-            var mm = (links[j].getAttribute('href')||'').match(/^\\/([^\\/]+)\\/?$/);
-            if (mm && mm[1] && mm[1].charAt(0)!=='_' && !reserved[mm[1]] &&
-                (links[j].querySelector('img') || links[j].getAttribute('aria-label'))) return mm[1];
-          }
-          // fall back to the embedded page JSON (Pinterest ships __PWS_DATA__)
-          try {
-            var s = document.getElementById('__PWS_DATA__');
-            var txt = s ? s.textContent : document.documentElement.innerHTML;
-            var m = txt.match(/"username"\\s*:\\s*"([^"]+)"/);
-            if (m && m[1]) return m[1];
-          } catch (e) {}
-          return null;
-        })();
-        """
-        return await evalJS(js) as? String
     }
 
     private func jsString(_ s: String) -> String {
@@ -156,12 +162,17 @@ final class PinterestScraper: NSObject {
         }
     }
 
+    /// Loads a URL and resolves when navigation finishes/fails OR after a hard
+    /// timeout — so a hung Pinterest load (or a dead WebContent process) can
+    /// never deadlock the connect window or the headless harvest.
     private func load(_ url: URL) async {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            let waiter = LoadWaiter { c.resume() }
+            let once = OnceResumer(c)
+            let waiter = LoadWaiter { once.fire() }
             loadWaiter = waiter
             web.navigationDelegate = waiter
             web.load(URLRequest(url: url))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) { once.fire() }
         }
     }
 
@@ -170,7 +181,14 @@ final class PinterestScraper: NSObject {
     }
 }
 
-/// Resolves a continuation once the first navigation finishes (or fails).
+/// Resumes a continuation at most once (main-thread only).
+final class OnceResumer {
+    private var cont: CheckedContinuation<Void, Never>?
+    init(_ c: CheckedContinuation<Void, Never>) { cont = c }
+    func fire() { cont?.resume(); cont = nil }
+}
+
+/// Resolves once the first navigation finishes/fails — or the content process dies.
 final class LoadWaiter: NSObject, WKNavigationDelegate {
     private let done: () -> Void
     private var fired = false
@@ -179,4 +197,5 @@ final class LoadWaiter: NSObject, WKNavigationDelegate {
     func webView(_ w: WKWebView, didFinish n: WKNavigation!) { fire() }
     func webView(_ w: WKWebView, didFail n: WKNavigation!, withError e: Error) { fire() }
     func webView(_ w: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError e: Error) { fire() }
+    func webViewWebContentProcessDidTerminate(_ w: WKWebView) { fire() }
 }

@@ -77,6 +77,9 @@ struct RootView: View {
                 NSEvent.removeMonitor(m); keyMonitor = nil
             }
         }
+        .onDisappear {   // don't leak the Esc monitor if the window closes mid-browse
+            if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+        }
     }
 
     // MARK: - browse mode
@@ -181,6 +184,14 @@ struct RootView: View {
                     .foregroundStyle(.white.opacity(0.9))
                 Spacer()
                 if refreshing { ProgressView().controlSize(.small) }
+            }
+
+            if settings.connected && PinWall.harvestLoggedOut {
+                Button { connect() } label: {
+                    Label("Pinterest sign-in expired — reconnect", systemImage: "exclamationmark.triangle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(GlassButtonStyle(tint: .orange.opacity(0.30)))
             }
 
             if settings.connected {
@@ -455,6 +466,12 @@ struct RootView: View {
                 .buttonStyle(GlassButtonStyle(tint: .white.opacity(0.10)))
             }
 
+            Button { confirmUninstall() } label: {
+                Label("Uninstall PinWall…", systemImage: "trash")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(GlassButtonStyle(tint: .white.opacity(0.08)))
+
             HStack {
                 Text("v\(appVersion)")
                     .font(.system(size: 11))
@@ -467,6 +484,20 @@ struct RootView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    private func confirmUninstall() {
+        let a = NSAlert()
+        a.messageText = "Uninstall PinWall?"
+        a.informativeText = "This removes the screensaver, stops the background refresh, and deletes "
+            + "your cached feed + settings. Afterwards, drag PinWall to the Trash. This can't be undone."
+        a.addButton(withTitle: "Uninstall")
+        a.addButton(withTitle: "Cancel")
+        a.alertStyle = .warning
+        if a.runModal() == .alertFirstButtonReturn {
+            Installer.uninstall()
+            NSApp.terminate(nil)
+        }
     }
 
     private func logout() {

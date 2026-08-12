@@ -25,8 +25,13 @@ enum PinterestConnect {
         let store = WKWebsiteDataStore.default()
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
         store.fetchDataRecords(ofTypes: types) { records in
-            let pinterest = records.filter { $0.displayName.contains("pinterest") }
-            store.removeData(ofTypes: types, for: pinterest) {
+            // displayName is the registrable domain — clear the CDN (pinimg.com)
+            // too, not just pinterest.com, or image cache/cookies survive logout.
+            let toClear = records.filter {
+                let n = $0.displayName.lowercased()
+                return n.contains("pinterest") || n.contains("pinimg")
+            }
+            store.removeData(ofTypes: types, for: toClear) {
                 PinStore.save([])
                 BoardStore.save([])
                 var s = WallSettings.load()
@@ -40,14 +45,16 @@ enum PinterestConnect {
     }
 }
 
-final class PinterestConnectWindowController: NSWindowController {
+final class PinterestConnectWindowController: NSWindowController, NSWindowDelegate {
     private let onDone: (Bool) -> Void
     private var web: WKWebView!
     private var status: NSTextField!
     private var spinner: NSProgressIndicator!
     private var continueButton: NSButton!
     private var scraper: PinterestScraper?
+    private var scrapeTask: Task<Void, Never>?
     private var busy = false
+    private var finished = false
 
     init(onDone: @escaping (Bool) -> Void) {
         self.onDone = onDone
@@ -57,10 +64,24 @@ final class PinterestConnectWindowController: NSWindowController {
         win.title = "Connect your Pinterest"
         win.isReleasedWhenClosed = false
         super.init(window: win)
+        win.delegate = self
         buildUI()
         loadLogin()
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Single exit path — runs the completion exactly once, cancels any in-flight
+    /// scrape, and tears down. Closing the title-bar X routes here via
+    /// windowWillClose; Cancel and success route here directly.
+    private func finish(_ connected: Bool) {
+        if finished { return }
+        finished = true
+        scrapeTask?.cancel()
+        onDone(connected)
+        if window?.isVisible == true { window?.close() }
+    }
+
+    func windowWillClose(_ notification: Notification) { finish(false) }
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
@@ -89,10 +110,10 @@ final class PinterestConnectWindowController: NSWindowController {
         spinner.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(spinner)
 
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-        cancel.bezelStyle = .rounded
-        cancel.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(cancel)
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+        cancelButton.bezelStyle = .rounded
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(cancelButton)
 
         continueButton = NSButton(title: "I’m logged in — Continue", target: self, action: #selector(continueTapped))
         continueButton.bezelStyle = .rounded
@@ -118,8 +139,8 @@ final class PinterestConnectWindowController: NSWindowController {
 
             continueButton.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -16),
             continueButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            cancel.trailingAnchor.constraint(equalTo: continueButton.leadingAnchor, constant: -10),
-            cancel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            cancelButton.trailingAnchor.constraint(equalTo: continueButton.leadingAnchor, constant: -10),
+            cancelButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
     }
 
@@ -127,13 +148,10 @@ final class PinterestConnectWindowController: NSWindowController {
         web.load(URLRequest(url: URL(string: "https://www.pinterest.com/login/")!))
     }
 
-    @objc private func cancel() {
-        window?.close()
-        onDone(false)
-    }
+    @objc private func cancel() { finish(false) }
 
     @objc private func continueTapped() {
-        guard !busy else { return }
+        guard !busy, !finished else { return }
         busy = true
         continueButton.isEnabled = false
         spinner.startAnimation(nil)
@@ -141,22 +159,25 @@ final class PinterestConnectWindowController: NSWindowController {
 
         let scraper = PinterestScraper(web: web)
         self.scraper = scraper
-        Task { @MainActor in
-            // load home + scrape; needsLoad navigates away from the login page
+        scrapeTask = Task { @MainActor in
             let (pins, loggedIn) = await scraper.run(needsLoad: true)
+            if finished || Task.isCancelled { return }
             if loggedIn {
                 PinStore.save(pins)
                 status.stringValue = "Finding your boards…"
                 let boards = await scraper.discoverBoards()
+                if finished || Task.isCancelled { return }
                 BoardStore.save(boards)
-                Installer.installHarvestAgent()
+                _ = Installer.installHarvestAgent()
                 spinner.stopAnimation(nil)
-                status.stringValue = "Connected — \(pins.count) pins, \(boards.count) boards."
-                window?.close()
-                onDone(true)
+                let pinNote = pins.count < PinterestScraper.minPins
+                    ? "Connected — your feed looks sparse (\(pins.count) pins)."
+                    : "Connected — \(pins.count) pins, \(boards.count) boards."
+                status.stringValue = pinNote
+                finish(true)
             } else {
                 spinner.stopAnimation(nil)
-                status.stringValue = "Still looks logged out. Finish logging in, then try again."
+                status.stringValue = "Still looks logged out. Finish logging in, then click Continue."
                 continueButton.isEnabled = true
                 busy = false
                 loadLogin()

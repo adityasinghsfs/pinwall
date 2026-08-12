@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Security
 
 // Custom entry point so `PinWall.app --harvest` can run headless (no window,
 // no dock icon) and exit, while a normal launch shows the SwiftUI UI.
@@ -39,17 +40,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        // App Translocation: macOS runs quarantined apps from a read-only,
+        // disappearing path. The screensaver mirror + harvest agent can't be
+        // wired to it, so warn the user to move PinWall to /Applications.
+        if PinWall.isTranslocated {
+            warnTranslocated()
+            return   // don't write ephemeral paths anywhere
+        }
+
         // Record our path so the screensaver's "Configure" button can open us.
         UserDefaults(suiteName: PinWall.suiteName)?.set(Bundle.main.bundlePath, forKey: "appPath")
-        // Publish the wall (html + pins + settings as plain files in the real
-        // home) for the sandboxed screensaver, which can't read our defaults.
+        // Keep the installed screensaver in sync with THIS app version, so a
+        // saver bugfix ships with an app update.
+        Installer.syncSaverIfNeeded()
+        // Publish the wall as plain files for the sandboxed screensaver.
         PinWall.publishSaverMirror()
-        // Self-heal the harvest LaunchAgent: re-point it at THIS binary. A stale
-        // agent aimed at a deleted/older build crash-loops at launch instead of
-        // refreshing the feed.
-        if WallSettings.load().connected { Installer.installHarvestAgent() }
-        // Check GitHub for a newer release shortly after launch (Phase 4).
+        // Self-heal the harvest LaunchAgent: re-point it at THIS binary.
+        if WallSettings.load().connected {
+            if !Installer.installHarvestAgent() {
+                UserDefaults(suiteName: PinWall.suiteName)?.set(true, forKey: "agentInstallFailed")
+            } else {
+                UserDefaults(suiteName: PinWall.suiteName)?.set(false, forKey: "agentInstallFailed")
+            }
+        }
+        // Check GitHub for a newer release shortly after launch.
         Updater.shared.checkOnLaunch()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    private func warnTranslocated() {
+        let a = NSAlert()
+        a.messageText = "Move PinWall to Applications"
+        a.informativeText = "PinWall is running from a temporary, read-only location, so the "
+            + "screensaver and hourly refresh can't be set up. Drag PinWall into your Applications "
+            + "folder, then open it from there."
+        a.addButton(withTitle: "Reveal in Finder")
+        a.addButton(withTitle: "Quit")
+        if a.runModal() == .alertFirstButtonReturn {
+            // Reveal the bundle so the user can drag it into Applications
+            // (dragging even from a translocated mount copies the real app).
+            NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+        }
+        NSApp.terminate(nil)
+    }
 }

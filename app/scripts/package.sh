@@ -34,11 +34,22 @@ else
   NOTARIZE=0
 fi
 
-# --- build ------------------------------------------------------------------
-echo "==> Generating project + building $CONFIG…"
+# --- build (UNIVERSAL: Intel + Apple Silicon) -------------------------------
+echo "==> Generating project + building $CONFIG (arm64 + x86_64)…"
 command -v xcodegen >/dev/null && xcodegen generate >/dev/null
 xcodebuild -project "$APP.xcodeproj" -scheme "$APP" -configuration "$CONFIG" \
-  -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO build >/dev/null
+  -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO build >/dev/null
+
+# fail loudly if the shipped binaries aren't universal — Intel users can't
+# launch an arm64-only app.
+for bin in "$PRODUCT/Contents/MacOS/$APP" "$SAVER/Contents/MacOS/$APP"; do
+  archs=$(lipo -archs "$bin" 2>/dev/null)
+  case "$archs" in
+    *arm64*x86_64*|*x86_64*arm64*) echo "    universal: $bin ($archs)";;
+    *) echo "ERROR: $bin is not universal (archs: $archs)"; exit 1;;
+  esac
+done
 
 # --- sign (inner-out) -------------------------------------------------------
 echo "==> Signing (inner-out)…"

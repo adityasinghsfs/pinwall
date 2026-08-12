@@ -37,8 +37,41 @@ public enum PinWall {
         if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
             return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
         }
+        // Fallback: strip the sandbox-container suffix off NSHomeDirectory()
+        // (…/Library/Containers/<id>/Data) so we don't resolve back into it.
+        let home = NSHomeDirectory()
+        if let r = home.range(of: "/Library/Containers/") {
+            return URL(fileURLWithPath: String(home[..<r.lowerBound]), isDirectory: true)
+        }
         return FileManager.default.homeDirectoryForCurrentUser
     }
+
+    /// True when macOS is running the app from a read-only, ephemeral
+    /// AppTranslocation path (Gatekeeper does this to quarantined apps launched
+    /// from a DMG / Downloads). The path vanishes on eject, so we must NOT record
+    /// it in the LaunchAgent or the saver's app-path.
+    public static var isTranslocated: Bool {
+        Bundle.main.bundlePath.contains("/AppTranslocation/")
+    }
+
+    // MARK: - harvest status (surfaced in the app so a stale feed isn't silent)
+
+    private static var suite: UserDefaults? { UserDefaults(suiteName: suiteName) }
+
+    /// Record the outcome of a harvest so the app can show "reconnect" / staleness.
+    public static func recordHarvest(loggedIn: Bool, saved: Bool) {
+        let d = suite
+        d?.set(Date().timeIntervalSince1970, forKey: "lastHarvestAttempt")
+        if saved {
+            d?.set(0, forKey: "harvestFailStreak")
+            d?.set(false, forKey: "harvestLoggedOut")
+        } else {
+            d?.set((d?.integer(forKey: "harvestFailStreak") ?? 0) + 1, forKey: "harvestFailStreak")
+            d?.set(!loggedIn, forKey: "harvestLoggedOut")
+        }
+    }
+    /// The last harvest found the session logged out — the user must reconnect.
+    public static var harvestLoggedOut: Bool { suite?.bool(forKey: "harvestLoggedOut") ?? false }
 
     /// Where the app PUBLISHES the wall for the sandboxed screensaver:
     /// plain files in the real home (pinwall.html + pins.js + settings.js).
@@ -51,30 +84,66 @@ public enum PinWall {
     }
 
     /// Regenerate the published mirror. Called by the app on launch and after
-    /// every settings/pins change. No-op inside the sandboxed saver.
+    /// every settings/pins change. No-op inside the sandboxed saver, and skipped
+    /// when translocated (the app-path would be an ephemeral, disappearing URL).
+    ///
+    /// Writes into a temp dir and atomically swaps it into place so a saver that
+    /// starts mid-publish never pairs new html with stale/absent settings.js.
     public static func publishSaverMirror() {
-        guard !inSandboxContainer else { return }
+        guard !inSandboxContainer, !isTranslocated else { return }
         let fm = FileManager.default
         let dir = saverWebDir
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let parent = dir.deletingLastPathComponent()
+        try? fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        let tmp = parent.appendingPathComponent("web.tmp-\(getpid())", isDirectory: true)
+        try? fm.removeItem(at: tmp)
+        guard (try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil else { return }
+
         if let src = Bundle.main.url(forResource: "pinwall", withExtension: "html", subdirectory: "web")
             ?? Bundle.main.url(forResource: "pinwall", withExtension: "html"),
            let html = try? Data(contentsOf: src) {
-            try? html.write(to: dir.appendingPathComponent("pinwall.html"), options: .atomic)
+            try? html.write(to: tmp.appendingPathComponent("pinwall.html"))
         }
         let settings = WallSettings.load()
         let pins = PinStore.load()
+        // No pins → skeleton (shimmer), NEVER the demo picsum wall: the
+        // screensaver must not pull random internet stock photos onto a lock
+        // screen. Real pins → the wall.
         let cfg = "window.PINWALL_CONFIG = "
-            + settings.configJSON(gallery: false, skeleton: settings.connected, app: false, reload: true)
-            + ";\n"
-        try? cfg.data(using: .utf8)?.write(to: dir.appendingPathComponent("settings.js"), options: .atomic)
+            + settings.configJSON(gallery: false, skeleton: pins.isEmpty, app: false, reload: true) + ";\n"
+        try? cfg.data(using: .utf8)?.write(to: tmp.appendingPathComponent("settings.js"))
         let pjs = "window.PINS = " + PinStore.pinsJSON(pins) + ";\n"
-        try? pjs.data(using: .utf8)?.write(to: dir.appendingPathComponent("pins.js"), options: .atomic)
-        // where the saver's "Options…" button finds the app (UserDefaults is
-        // container-isolated in the appex, so this travels as a file too)
+        try? pjs.data(using: .utf8)?.write(to: tmp.appendingPathComponent("pins.js"))
         try? Bundle.main.bundlePath.data(using: .utf8)?
-            .write(to: dir.appendingPathComponent("apppath.txt"), options: .atomic)
+            .write(to: tmp.appendingPathComponent("apppath.txt"))
+
+        // atomic swap: web.tmp -> web (replaceItemAt handles the existing dir)
+        if fm.fileExists(atPath: dir.path) {
+            _ = try? fm.replaceItemAt(dir, withItemAt: tmp)
+        } else {
+            try? fm.moveItem(at: tmp, to: dir)
+        }
+        try? fm.removeItem(at: tmp)
     }
+}
+
+/// A machine-wide lock so only one harvest (headless LaunchAgent OR in-app)
+/// touches the shared WebKit cookie/data store at a time. O_EXCL create is
+/// atomic across processes; stale locks (crashed holder) break after 10 min.
+public enum HarvestLock {
+    private static var file: URL { PinWall.supportDir.appendingPathComponent("harvest.lock") }
+    public static func acquire() -> Bool {
+        let path = file.path
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let mod = attrs[.modificationDate] as? Date, Date().timeIntervalSince(mod) > 600 {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+        let fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0o644)
+        if fd == -1 { return false }
+        close(fd)
+        return true
+    }
+    public static func release() { try? FileManager.default.removeItem(at: file) }
 }
 
 /// One pin: the image URL plus the Pinterest link it opens in gallery mode.
@@ -243,13 +312,21 @@ public struct WallSettings: Equatable {
     /// screensaver passes false so the cursor stays hidden while it's showing.
     public func configJSON(gallery: Bool, skeleton: Bool, app: Bool,
                            hideWall: Bool = false, reload: Bool = false) -> String {
-        "{ \"speed\": \(speed), \"fade\": \(fade), \"rise\": \(rise), \"stagger\": \(stagger), " +
-        "\"columns\": \(columns), \"clock\": \(clock), \"clockPos\": \"\(clockPos)\", " +
-        "\"clockSize\": \(clockSize), \"clockDate\": \(clockDate), " +
-        "\"clockFont\": \"\(clockFont)\", \"clockWeight\": \(clockWeight), " +
-        "\"clockGlass\": \(clockGlass), \"clockColor\": \"\(clockColor)\", " +
-        "\"gallery\": \(gallery), \"skeleton\": \(skeleton), \"app\": \(app), " +
-        "\"hideWall\": \(hideWall), \"reload\": \(reload) }"
+        // Serialize properly so string fields (clockPos/clockFont/clockColor) are
+        // escaped — a stray quote/backslash would otherwise produce invalid JS
+        // and blank the wall / break in-app injection.
+        let dict: [String: Any] = [
+            "speed": speed, "fade": fade, "rise": rise, "stagger": stagger,
+            "columns": columns, "clock": clock, "clockPos": clockPos,
+            "clockSize": clockSize, "clockDate": clockDate,
+            "clockFont": clockFont, "clockWeight": clockWeight,
+            "clockGlass": clockGlass, "clockColor": clockColor,
+            "gallery": gallery, "skeleton": skeleton, "app": app,
+            "hideWall": hideWall, "reload": reload,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: dict),
+           let s = String(data: data, encoding: .utf8) { return s }
+        return "{}"
     }
 }
 
