@@ -60,11 +60,20 @@ codesign --verify --strict "$PRODUCT" && echo "    signature OK"
 
 # --- build the DMG ----------------------------------------------------------
 echo "==> Building DMG…"
-rm -rf "$DIST/stage" "$DMG"; mkdir -p "$DIST/stage"
-cp -R "$PRODUCT" "$DIST/stage/"
-ln -s /Applications "$DIST/stage/Applications"
-hdiutil create -volname "$APP" -srcfolder "$DIST/stage" -ov -format UDZO "$DMG" >/dev/null
-rm -rf "$DIST/stage"
+rm -f "$DMG"
+if python3 -m dmgbuild --help >/dev/null 2>&1 && [ -f scripts/dmg_settings.py ] && [ -f Resources/dmg/bg.tiff ]; then
+  echo "    (designed window via dmgbuild)"
+  python3 -m dmgbuild -s scripts/dmg_settings.py \
+    -D app="$PWD/$PRODUCT" -D icon="$PWD/Resources/AppIcon.icns" -D bg="$PWD/Resources/dmg/bg.tiff" \
+    "$APP" "$DMG"
+else
+  echo "    (plain window via hdiutil — install dmgbuild + Resources/dmg/bg.tiff for the designed one)"
+  rm -rf "$DIST/stage"; mkdir -p "$DIST/stage"
+  cp -R "$PRODUCT" "$DIST/stage/"
+  ln -s /Applications "$DIST/stage/Applications"
+  hdiutil create -volname "$APP" -srcfolder "$DIST/stage" -ov -format UDZO "$DMG" >/dev/null
+  rm -rf "$DIST/stage"
+fi
 echo "    $DMG"
 
 # --- notarize (needs a Developer ID cert AND stored notary credentials) -----
