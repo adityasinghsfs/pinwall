@@ -79,6 +79,14 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
         win.contentView = web
         win.orderBack(nil)   // off-screen, don't steal focus
         self.window = win
+        // Off-screen ⇒ WebKit deems the page occluded and suspends rendering +
+        // lazy image loading, so Pinterest mounts zero pins. Disable window
+        // occlusion detection so the headless webview keeps rendering.
+        let sel = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        if web.responds(to: sel) {
+            typealias SetBoolIMP = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(web.method(for: sel), to: SetBoolIMP.self)(web, sel, false)
+        }
 
         let scraper = PinterestScraper(web: web)
         self.scraper = scraper

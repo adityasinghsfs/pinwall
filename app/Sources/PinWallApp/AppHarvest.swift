@@ -22,10 +22,12 @@ enum AppHarvest {
         let s = makeScraper()
         let target = Int(WallSettings.load().pinTarget)
         watchdog { completion(0) }
+        Harvester.log("AppHarvest START source=\(source)")
         Task { @MainActor in
             let (pins, loggedIn) = await s.run(sourceURL: FeedSource.url(for: source),
                                                target: target, maxScrolls: max(60, target),
                                                needsLoad: true)
+            Harvester.log("AppHarvest DONE source=\(source) pins=\(pins.count) loggedIn=\(loggedIn) saved=\(loggedIn && !pins.isEmpty)")
             // User explicitly chose this source — save whatever real pins it has
             // (a small board is valid), as long as we're genuinely logged in.
             if loggedIn && !pins.isEmpty { PinStore.save(pins) }
@@ -61,7 +63,22 @@ enum AppHarvest {
         win.contentView = web
         win.orderBack(nil)
         window = win
+        // The window is parked off every screen, so WebKit treats the page as
+        // OCCLUDED and suspends rendering, timers and lazy image loading —
+        // Pinterest's virtualized grid then mounts zero pins (pins=0). Disable
+        // window occlusion detection (same private SPI the saver relies on) so
+        // the off-screen harvest webview keeps rendering and the pins load.
+        disableOcclusionDetection(web)
         let s = PinterestScraper(web: web); scraper = s; return s
+    }
+
+    /// `_setWindowOcclusionDetectionEnabled:NO` — makes WebKit treat the page as
+    /// always-visible even though the host window is off-screen.
+    private static func disableOcclusionDetection(_ web: WKWebView) {
+        let sel = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        guard web.responds(to: sel) else { return }
+        typealias SetBoolIMP = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(web.method(for: sel), to: SetBoolIMP.self)(web, sel, false)
     }
     private static func watchdog(_ onTimeout: @escaping () -> Void) {
         Task { @MainActor in
