@@ -64,8 +64,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 UserDefaults(suiteName: PinWall.suiteName)?.set(false, forKey: "agentInstallFailed")
             }
         }
-        // Check GitHub for a newer release shortly after launch.
-        Updater.shared.checkOnLaunch()
+        // Updates are user-driven: no launch-time prompt. The settings panel's
+        // "Check for updates" button is the only trigger, so an update never
+        // interrupts on launch.
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 

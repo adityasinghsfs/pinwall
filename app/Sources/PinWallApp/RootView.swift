@@ -287,9 +287,42 @@ struct RootView: View {
         var url = newBoardURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else { return }
         if !url.hasPrefix("http") { url = "https://" + url }
-        guard url.contains("pinterest.") else { sourceStatus = "That's not a Pinterest URL"; return }
+        guard let host = URL(string: url)?.host?.lowercased() else {
+            sourceStatus = "That's not a valid URL"; return
+        }
+        // pin.it share links are short redirects — follow them to the canonical
+        // pinterest.com board URL before saving (the scraper can't harvest a
+        // board off the short link itself).
+        if host.contains("pin.it") {
+            sourceStatus = "Resolving link…"
+            Task { @MainActor in
+                if let resolved = await Self.resolveShortLink(url) {
+                    finishAddBoard(resolved)
+                } else {
+                    sourceStatus = "Couldn't resolve that pin.it link"
+                }
+            }
+            return
+        }
+        guard host.contains("pinterest.") else { sourceStatus = "That's not a Pinterest URL"; return }
+        finishAddBoard(url)
+    }
+
+    /// Commits a resolved pinterest.com URL as the active board source. Rejects
+    /// single-pin links (`/pin/…`) since a board source needs a board.
+    private func finishAddBoard(_ input: String) {
+        var url = input
+        // drop tracking query/fragment that pin.it appends on resolve
+        if var comps = URLComponents(string: url) {
+            comps.query = nil; comps.fragment = nil
+            url = comps.url?.absoluteString ?? url
+        }
+        let parts = URL(string: url)?.pathComponents.filter { $0 != "/" } ?? []
+        if parts.first?.lowercased() == "pin" {
+            sourceStatus = "That's a single pin, not a board"; return
+        }
         if !url.hasSuffix("/") { url += "/" }
-        let slug = URL(string: url)?.pathComponents.filter { $0 != "/" }.last ?? "Board"
+        let slug = parts.last ?? "Board"
         let name = slug.replacingOccurrences(of: "-", with: " ").capitalized
         var list = boards
         if !list.contains(where: { $0.url == url }) { list.append(Board(name: name, url: url)) }
@@ -300,6 +333,18 @@ struct RootView: View {
         settings.source = url
         settings.save()
         refreshSource()
+    }
+
+    /// Follows a pin.it (or any) short link to its final pinterest.com URL.
+    private static func resolveShortLink(_ url: String) async -> String? {
+        guard let u = URL(string: url) else { return nil }
+        var req = URLRequest(url: u)
+        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 15
+        guard let (_, resp) = try? await URLSession.shared.data(for: req),
+              let final = resp.url, (final.host?.lowercased().contains("pinterest.") ?? false)
+        else { return nil }
+        return final.absoluteString
     }
 
     private var motionSection: some View {
