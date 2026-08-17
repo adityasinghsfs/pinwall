@@ -30,8 +30,30 @@ enum AppHarvest {
             Harvester.log("AppHarvest DONE source=\(source) pins=\(pins.count) loggedIn=\(loggedIn) saved=\(loggedIn && !pins.isEmpty)")
             // User explicitly chose this source — save whatever real pins it has
             // (a small board is valid), as long as we're genuinely logged in.
-            if loggedIn && !pins.isEmpty { PinStore.save(pins) }
+            if loggedIn && !pins.isEmpty { PinStore.save(pins, cacheFor: "pinterest") }
             done { completion(pins.count) }
+        }
+    }
+
+    /// Foreground iCloud album refresh — plain HTTPS, no webview needed, but it
+    /// still honors the machine-wide HarvestLock so it can't race a background
+    /// harvest writing pins.json.
+    static func runICloud(link: String, completion: @escaping (Int, String?) -> Void) {
+        guard !running else { completion(0, "A refresh is already running"); return }
+        guard HarvestLock.acquire() else { completion(0, "A refresh is already running"); return }
+        begin()
+        watchdog { completion(0, "Timed out talking to iCloud") }
+        Harvester.log("AppHarvest START icloud=\(link)")
+        Task { @MainActor in
+            do {
+                let pins = try await ICloudAlbum.fetch(link: link, limit: Int(WallSettings.load().pinTarget))
+                Harvester.log("AppHarvest DONE icloud pins=\(pins.count)")
+                if !pins.isEmpty { PinStore.save(pins, cacheFor: "icloud") }
+                done { completion(pins.count, nil) }
+            } catch {
+                Harvester.log("AppHarvest FAIL icloud: \(error.localizedDescription)")
+                done { completion(0, error.localizedDescription) }
+            }
         }
     }
 

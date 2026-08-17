@@ -170,6 +170,45 @@ public enum PinStore {
         let t = UserDefaults(suiteName: PinWall.suiteName)?.double(forKey: "lastRefresh") ?? 0
         return t > 0 ? Date(timeIntervalSince1970: t) : nil
     }
+
+    // MARK: per-provider caches — so switching Pinterest ↔ iCloud swaps the wall
+    // instantly from cache instead of waiting for a fresh harvest.
+
+    private static func cacheFile(for provider: String) -> URL {
+        PinWall.supportDir.appendingPathComponent("pins-\(provider).json")
+    }
+    public static func loadCache(for provider: String) -> [Pin] {
+        // Pure cache read — NO fallback to the active pins.json here: at switch
+        // time pins.json holds the OUTGOING provider's wall, and falling back
+        // would leak it into (or wipe) the other provider's cache. Migration is
+        // handled by snapshotting the active wall before every switch.
+        guard let data = try? Data(contentsOf: cacheFile(for: provider)),
+              let pins = try? JSONDecoder().decode([Pin].self, from: data) else { return [] }
+        return pins
+    }
+    public static func saveCache(_ pins: [Pin], for provider: String) {
+        // An empty write NEVER overwrites a cache — an empty active wall must
+        // not be able to wipe a provider's good feed. Explicit removal goes
+        // through clearCache (unlink).
+        guard !pins.isEmpty, let data = try? JSONEncoder().encode(pins) else { return }
+        try? data.write(to: cacheFile(for: provider), options: .atomic)
+    }
+    public static func clearCache(for provider: String) {
+        try? FileManager.default.removeItem(at: cacheFile(for: provider))
+    }
+    /// Saves to BOTH the provider's cache and (when that provider is active)
+    /// the live wall. Harvests call this instead of save().
+    public static func save(_ pins: [Pin], cacheFor provider: String) {
+        saveCache(pins, for: provider)
+        if WallSettings.load().provider == provider { save(pins) }
+    }
+    /// Makes `provider`'s cached pins the live wall. Returns how many it had.
+    @discardableResult
+    public static func activate(provider: String) -> Int {
+        let pins = loadCache(for: provider)
+        save(pins)
+        return pins.count
+    }
     /// JSON array literal for injecting into the page as `window.PINS`.
     public static func pinsJSON(_ pins: [Pin]) -> String {
         guard let data = try? JSONEncoder().encode(pins),
@@ -232,6 +271,8 @@ public struct WallSettings: Equatable {
     public var introStyle: String  // entrance: "bloom" | "radial" | "radialDots"
     public var introOrigin: String // radial reveal origin: "bc" | "bl" | "br"
     public var introMs: Double     // intro duration in ms (1000–3000)
+    public var provider: String    // photo source: "pinterest" | "icloud"
+    public var icloudURL: String   // public iCloud Shared Album link ("" = not linked)
 
     public init(speed: Double, fade: Double, rise: Double, stagger: Double,
                 columns: Double, topBlur: Double, chroma: Double,
@@ -239,7 +280,8 @@ public struct WallSettings: Equatable {
                 clockFont: String, clockWeight: Double, clockGlass: Bool, clockColor: String,
                 chargerOnly: Bool, refreshMins: Double = 60, pinTarget: Double = 100,
                 connected: Bool, source: String,
-                introStyle: String = "bloom", introOrigin: String = "bc", introMs: Double = 1800) {
+                introStyle: String = "bloom", introOrigin: String = "bc", introMs: Double = 1800,
+                provider: String = "pinterest", icloudURL: String = "") {
         self.speed = speed; self.fade = fade; self.rise = rise; self.stagger = stagger
         self.columns = columns; self.topBlur = topBlur; self.chroma = chroma
         self.clock = clock; self.clockPos = clockPos; self.clockSize = clockSize; self.clockDate = clockDate
@@ -252,6 +294,8 @@ public struct WallSettings: Equatable {
         self.introStyle = introStyle
         self.introOrigin = introOrigin
         self.introMs = introMs
+        self.provider = provider
+        self.icloudURL = icloudURL
     }
 
     /// Tuning defaults (everything except the Pinterest connection).
@@ -300,7 +344,9 @@ public struct WallSettings: Equatable {
             source: d.string(forKey: "source") ?? FeedSource.feed,
             introStyle: d.string(forKey: "introStyle") ?? "bloom",
             introOrigin: d.string(forKey: "introOrigin") ?? "bc",
-            introMs: dbl("introMs", 1800))
+            introMs: dbl("introMs", 1800),
+            provider: d.string(forKey: "provider") ?? "pinterest",
+            icloudURL: d.string(forKey: "icloudURL") ?? "")
     }
     public func save() {
         let d = WallSettings.store
@@ -319,6 +365,8 @@ public struct WallSettings: Equatable {
         d.set(introStyle, forKey: "introStyle")
         d.set(introOrigin, forKey: "introOrigin")
         d.set(introMs, forKey: "introMs")
+        d.set(provider, forKey: "provider")
+        d.set(icloudURL, forKey: "icloudURL")
         PinWall.publishSaverMirror()   // keep the screensaver's file mirror fresh
     }
     /// Object literal for injecting into the page as `window.PINWALL_CONFIG`.

@@ -51,6 +51,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Record our path so the screensaver's "Configure" button can open us.
         UserDefaults(suiteName: PinWall.suiteName)?.set(Bundle.main.bundlePath, forKey: "appPath")
+        // One-time migration: pre-cache installs kept the whole feed in pins.json
+        // (always Pinterest). Seed the pinterest cache from it so the first tab
+        // switch doesn't lose the wall. saveCache ignores empty writes.
+        let s0 = WallSettings.load()
+        if s0.provider == "pinterest", PinStore.loadCache(for: "pinterest").isEmpty {
+            PinStore.saveCache(PinStore.load(), for: "pinterest")
+        }
         // Keep the installed screensaver in sync with THIS app version, so a
         // saver bugfix ships with an app update.
         Installer.syncSaverIfNeeded()

@@ -30,16 +30,25 @@
      (radial / dot-matrix intros). Above the wall + clock, below the tuner. */
   #veil { position: fixed; inset: 0; z-index: 5000; display: none; pointer-events: none; }
 
-  /* skeleton state: shown before any pins exist (native app, pre-login) */
-  #skeleton { position: fixed; inset: 0; display: none; gap: var(--gap);
-    padding: var(--gap); box-sizing: border-box; background: #000; }
-  body.skeleton #skeleton { display: flex; }
+  /* skeleton state: shown before any pins exist. EXACTLY the PinWall website
+     backdrop — rotated, slowly-drifting red-gradient wall, dimmed + scrimmed. */
+  #skelwrap { position: fixed; inset: 0; display: none; background: #0a0708; overflow: hidden; }
+  body.skeleton #skelwrap { display: block; }
   body.skeleton #viewport { display: none; }
-  #skeleton .col { flex: 1; display: flex; flex-direction: column; gap: var(--gap); }
-  #skeleton .sk { width: 100%; border-radius: 12px;
-    background: linear-gradient(100deg, #0d0d0f 30%, #191920 50%, #0d0d0f 70%);
-    background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
-  @keyframes shimmer { to { background-position: -200% 0; } }
+  #skeleton { position: absolute; inset: -14% -6%; display: flex; gap: 2.2vw;
+    justify-content: center; transform: rotate(-5deg) scale(1.14);
+    filter: blur(1px); opacity: .75; }
+  #skeleton .col { flex: 0 0 15vw; display: flex; flex-direction: column; gap: 2.2vw;
+    animation: skdrift linear infinite; }
+  #skeleton .col:nth-child(odd)  { animation-duration: 38s; }
+  #skeleton .col:nth-child(even) { animation-duration: 52s; animation-direction: reverse; }
+  @keyframes skdrift { from { transform: translateY(-6%); } to { transform: translateY(-32%); } }
+  #skeleton .sk { width: 100%; border-radius: 14px; flex: 0 0 auto;
+    background: linear-gradient(160deg, #7d101c 0%, #3d0810 55%, #160306 100%);
+    box-shadow: inset 0 1px 0 rgba(255,120,120,.18), 0 10px 30px rgba(0,0,0,.5); }
+  #skeleton .sk.hot { background: linear-gradient(160deg, #b21d2c, #4a0a13 60%, #160306); }
+  #skelwrap::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(135% 95% at 32% 38%, rgba(10,7,8,.12), rgba(10,7,8,.68) 88%); }
 
   #tuner { position: fixed; top: 16px; left: 16px; z-index: 9999; display: none; width: 240px;
     background: rgba(20,20,22,.92); color: #e8e8ea; backdrop-filter: blur(10px);
@@ -90,7 +99,7 @@
 <body>
 <div id="clock"><div class="clockbox"><div class="date"></div><div class="time"></div></div></div>
 <div id="viewport"></div>
-<div id="skeleton"></div>
+<div id="skelwrap"><div id="skeleton"></div></div>
 <div id="ghint">Gallery — scroll or drag to move, click a pin to open it on Pinterest</div>
 
 <div id="tuner">
@@ -555,10 +564,38 @@ function boot(PINS) {
   // directly: inside the sandboxed screensaver appex WebKit throttles or
   // suspends rAF and DOM timers (the page looks "hidden" to it), which left
   // the wall loaded but invisible.
+  // ---- drain: unlink plays the wall OUT — columns stop looping and scroll off
+  // the top; when the last tile leaves, the red skeleton takes over.
+  let draining = false, drainT0 = 0;
+  window.pinwallDrain = function () {
+    if (draining || document.body.classList.contains('skeleton')) return;
+    draining = true; drainT0 = 0;   // baseline captured on the next frame
+  };
+  function drainFrame() {
+    const nowS = Date.now() / 1000;
+    if (!drainT0) {
+      drainT0 = nowS;
+      const t = gallery ? vt : nowS;
+      columns.forEach(c => { if (!c.loopHeight) return;
+        c.drainOff = ((t * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight; });
+    }
+    const dSpeed = Math.max(speed, 80);          // never drain in slow motion
+    let allGone = true;
+    columns.forEach((c, i) => {
+      if (!c.loopHeight) return;
+      const total = c.el.scrollHeight;
+      const off = c.drainOff + (nowS - drainT0) * dSpeed * (1 + i * 0.07);
+      if (off < total) allGone = false;
+      c.el.style.transform = `translateY(${-Math.min(off, total)}px)`;
+    });
+    if (allGone) { draining = false; renderSkeleton(); }
+  }
+
   function frame(now) {
     if (now < lastFrame) lastFrame = now;   // clock source changed (native drive)
     if (now - lastFrame < FRAME_MS) return;
     lastFrame = now;
+    if (draining) { drainFrame(); return; }   // play-out overrides the loop
     if (gallery) {
       if (lastTs == null || now < lastTs) lastTs = now;
       if (autoScroll && !paused) vt += (now - lastTs) / 1000;
@@ -814,18 +851,18 @@ function boot(PINS) {
   setTimeout(() => viewport.querySelectorAll('img:not(.show):not(.instant)')
     .forEach(i => i.classList.add('instant')), startDelay + 4000);
 
-  // ---- skeleton (native, logged in but no pins yet) ----
+  // ---- skeleton: the PinWall marketing wall (rotated, drifting, dimmed) ----
   function renderSkeleton() {
     document.body.classList.add('skeleton');
     const sk = document.getElementById('skeleton');
-    const heights = [180, 260, 140, 320, 220, 300, 160, 240];
-    const colCount = Math.max(2, Math.floor(window.innerWidth / COLUMN_WIDTH));
+    if (sk.childElementCount) return;   // drain may call this twice
+    const heights = [190, 260, 150, 320, 230, 290, 170];
+    const colCount = 7;                 // fixed like the site (columns are 15vw)
     for (let ci = 0; ci < colCount; ci++) {
       const col = document.createElement('div'); col.className = 'col';
-      for (let i = 0; i < 8; i++) {
-        const b = document.createElement('div'); b.className = 'sk';
-        b.style.height = heights[(i + ci) % heights.length] + 'px';
-        b.style.animationDelay = ((i + ci) % 6) * 0.12 + 's';
+      for (let i = 0; i < 12; i++) {    // tall columns so the drift never runs out
+        const b = document.createElement('div'); b.className = 'sk' + (((i + ci) % 3 === 0) ? ' hot' : '');
+        b.style.height = heights[(i * 2 + ci) % heights.length] + 'px';
         col.appendChild(b);
       }
       sk.appendChild(col);

@@ -10,6 +10,8 @@ struct WallWebView: NSViewRepresentable {
     var reloadToken: Int = 0
     /// Bump this to replay the entrance animation without reloading.
     var replayToken: Int = 0
+    /// Bump this to play the wall OUT (unlink): tiles scroll off, then skeleton.
+    var drainToken: Int = 0
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -48,14 +50,22 @@ struct WallWebView: NSViewRepresentable {
             coord.lastReplayToken = replayToken
             web.evaluateJavaScript("window.pinwallReplay && window.pinwallReplay();", completionHandler: nil)
         }
+        // Unlink: play the wall out instead of cutting to the skeleton.
+        if drainToken != coord.lastDrainToken {
+            coord.lastDrainToken = drainToken
+            web.evaluateJavaScript("window.pinwallDrain && window.pinwallDrain();", completionHandler: nil)
+        }
     }
 
     private func load(_ web: WKWebView) {
         guard let html = Bundle.main.url(forResource: "pinwall", withExtension: "html", subdirectory: "web")
             ?? Bundle.main.url(forResource: "pinwall", withExtension: "html") else { return }
         let pins = PinStore.load()
+        // Skeleton (not the public demo wall) whenever the user has a source set
+        // up — Pinterest connected OR the iCloud tab — and the wall is empty.
+        let skel = settings.connected || settings.provider == "icloud"
         let js = pinwallBootstrapJS(pins: pins, settings: settings,
-                                    gallery: gallery, skeleton: settings.connected, app: true)
+                                    gallery: gallery, skeleton: skel, app: true)
         let user = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         web.configuration.userContentController.removeAllUserScripts()
         web.configuration.userContentController.addUserScript(user)
@@ -66,6 +76,7 @@ struct WallWebView: NSViewRepresentable {
         weak var web: WKWebView?
         var lastToken = 0
         var lastReplayToken = 0
+        var lastDrainToken = 0
         // In gallery mode, a pin click calls window.open — send it to the browser.
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction,

@@ -71,6 +71,25 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
             Harvester.log("timed out after \(Int(timeout))s"); HarvestLock.release(); exit(2)
         }
 
+        // iCloud album provider: plain HTTPS fetch, no webview/scraper needed.
+        let pre = WallSettings.load()
+        if pre.provider == "icloud" {
+            guard !pre.icloudURL.isEmpty else { Harvester.log("icloud provider but no album link — skipping"); HarvestLock.release(); exit(0) }
+            Task { @MainActor in
+                do {
+                    let pins = try await ICloudAlbum.fetch(link: pre.icloudURL, limit: Int(pre.pinTarget))
+                    if !pins.isEmpty { PinStore.save(pins, cacheFor: "icloud"); Harvester.log("harvested \(pins.count) icloud photos") }
+                    else { Harvester.log("icloud album returned nothing — kept existing") }
+                    PinWall.recordHarvest(loggedIn: true, saved: !pins.isEmpty)
+                } catch {
+                    Harvester.log("icloud harvest failed: \(error.localizedDescription) — kept existing")
+                }
+                HarvestLock.release()
+                exit(0)
+            }
+            return
+        }
+
         let frame = NSRect(x: -20_000, y: -20_000, width: 1400, height: 900)
         let win = NSWindow(contentRect: frame, styleMask: [.borderless],
                            backing: .buffered, defer: false)
@@ -98,7 +117,7 @@ final class HarvestDelegate: NSObject, NSApplicationDelegate {
                                                      needsLoad: true)
             let saved = loggedIn && pins.count >= PinterestScraper.minPins
             if saved {
-                PinStore.save(pins)
+                PinStore.save(pins, cacheFor: "pinterest")
                 Harvester.log("harvested \(pins.count) pins")
             } else {
                 Harvester.log(loggedIn ? "only \(pins.count) pins — kept existing"
