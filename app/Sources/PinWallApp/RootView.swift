@@ -119,7 +119,9 @@ struct RootView: View {
                 Divider().overlay(Color.white.opacity(0.12))
                 connectionSection
                 Divider().overlay(Color.white.opacity(0.12))
-                motionSection
+                wallSection
+                Divider().overlay(Color.white.opacity(0.12))
+                introSection
                 Divider().overlay(Color.white.opacity(0.12))
                 effectsSection
                 Divider().overlay(Color.white.opacity(0.12))
@@ -347,19 +349,25 @@ struct RootView: View {
         return final.absoluteString
     }
 
-    private var motionSection: some View {
+    // The always-on scrolling wall: how fast it drifts and how many columns.
+    private var wallSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionLabel("MOTION")
-            slider("Speed", value: $settings.speed, range: 10...120, unit: "")
-            slider("Fade", value: $settings.fade, range: 0...1200, unit: "ms")
-            slider("Rise", value: $settings.rise, range: 0...120, unit: "px")
-            slider("Stagger", value: $settings.stagger, range: 0...1500, unit: "ms")
+            sectionLabel("WALL")
+            slider("Scroll speed", value: $settings.speed, range: 10...120, unit: "")
             slider("Columns", value: $settings.columns, range: 3...10, unit: "", step: 1)
-            pickerRow("Intro", selection: introStyleBinding) {
+        }
+    }
+
+    // The entrance animation, played once when the screensaver starts.
+    private var introSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionLabel("INTRO")
+            pickerRow("Style", selection: introStyleBinding) {
                 Text("Bloom").tag("bloom")
                 Text("Radial").tag("radial")
                 Text("Radial dots").tag("radialDots")
             }
+            slider("Duration", value: $settings.introMs, range: 1000...3000, unit: "ms", step: 100)
             if settings.introStyle == "radial" || settings.introStyle == "radialDots" {
                 pickerRow("Reveal from", selection: introOriginBinding) {
                     Text("Bottom center").tag("bc")
@@ -370,7 +378,7 @@ struct RootView: View {
             Button {
                 PreviewController.shared.show()
             } label: {
-                Label("Preview", systemImage: "play.fill")
+                Label("Preview intro", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(GlassButtonStyle(tint: .pink))

@@ -37,7 +37,8 @@ struct WallWebView: NSViewRepresentable {
         }
         // Apply tuning + clock live, no reload — smooth slider dragging.
         let s = settings
-        let apply = "{speed:\(s.speed),fade:\(s.fade),rise:\(s.rise),stagger:\(s.stagger),columns:\(s.columns),clock:\(s.clock),introStyle:'\(s.introStyle)',introOrigin:'\(s.introOrigin)'}"
+        // Intro duration drives Bloom's fade/stagger and the radial/dots revealMs.
+        let apply = "{speed:\(s.speed),fade:\(s.introMs * 0.30),rise:24,stagger:\(s.introMs * 0.55),revealMs:\(s.introMs),columns:\(s.columns),clock:\(s.clock),introStyle:'\(s.introStyle)',introOrigin:'\(s.introOrigin)'}"
         let clockCfg = "{pos:'\(s.clockPos)',size:\(s.clockSize),date:\(s.clockDate),font:'\(s.clockFont)',weight:\(s.clockWeight),glass:\(s.clockGlass),color:'\(s.clockColor)'}"
         let js = "window.pinwallApply && window.pinwallApply(\(apply));"
                + "window.pinwallClockConfig && window.pinwallClockConfig(\(clockCfg));"

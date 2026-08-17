@@ -231,6 +231,7 @@ public struct WallSettings: Equatable {
     public var source: String      // "feed" or a board URL to harvest from
     public var introStyle: String  // entrance: "bloom" | "radial" | "radialDots"
     public var introOrigin: String // radial reveal origin: "bc" | "bl" | "br"
+    public var introMs: Double     // intro duration in ms (1000–3000)
 
     public init(speed: Double, fade: Double, rise: Double, stagger: Double,
                 columns: Double, topBlur: Double, chroma: Double,
@@ -238,7 +239,7 @@ public struct WallSettings: Equatable {
                 clockFont: String, clockWeight: Double, clockGlass: Bool, clockColor: String,
                 chargerOnly: Bool, refreshMins: Double = 60, pinTarget: Double = 100,
                 connected: Bool, source: String,
-                introStyle: String = "bloom", introOrigin: String = "bc") {
+                introStyle: String = "bloom", introOrigin: String = "bc", introMs: Double = 1800) {
         self.speed = speed; self.fade = fade; self.rise = rise; self.stagger = stagger
         self.columns = columns; self.topBlur = topBlur; self.chroma = chroma
         self.clock = clock; self.clockPos = clockPos; self.clockSize = clockSize; self.clockDate = clockDate
@@ -250,6 +251,7 @@ public struct WallSettings: Equatable {
         self.source = source
         self.introStyle = introStyle
         self.introOrigin = introOrigin
+        self.introMs = introMs
     }
 
     /// Tuning defaults (everything except the Pinterest connection).
@@ -271,7 +273,7 @@ public struct WallSettings: Equatable {
         clockPos = "tc"; clockSize = 100; clockDate = true
         clockFont = "system"; clockWeight = 200; clockGlass = false; clockColor = "#FFFFFF"
         chargerOnly = false; refreshMins = 60; pinTarget = 100
-        introStyle = "bloom"; introOrigin = "bc"
+        introStyle = "bloom"; introOrigin = "bc"; introMs = 1800
     }
 
     private static var store: UserDefaults { UserDefaults(suiteName: PinWall.suiteName) ?? .standard }
@@ -297,7 +299,8 @@ public struct WallSettings: Equatable {
             connected: d.bool(forKey: "connected"),
             source: d.string(forKey: "source") ?? FeedSource.feed,
             introStyle: d.string(forKey: "introStyle") ?? "bloom",
-            introOrigin: d.string(forKey: "introOrigin") ?? "bc")
+            introOrigin: d.string(forKey: "introOrigin") ?? "bc",
+            introMs: dbl("introMs", 1800))
     }
     public func save() {
         let d = WallSettings.store
@@ -315,6 +318,7 @@ public struct WallSettings: Equatable {
         d.set(source, forKey: "source")
         d.set(introStyle, forKey: "introStyle")
         d.set(introOrigin, forKey: "introOrigin")
+        d.set(introMs, forKey: "introMs")
         PinWall.publishSaverMirror()   // keep the screensaver's file mirror fresh
     }
     /// Object literal for injecting into the page as `window.PINWALL_CONFIG`.
@@ -325,9 +329,13 @@ public struct WallSettings: Equatable {
         // Serialize properly so string fields (clockPos/clockFont/clockColor) are
         // escaped — a stray quote/backslash would otherwise produce invalid JS
         // and blank the wall / break in-app injection.
+        // One "Intro duration" drives everything: radial/dots use it directly
+        // (revealMs); Bloom's per-tile fade + stagger are derived from it.
         let dict: [String: Any] = [
-            "speed": speed, "fade": fade, "rise": rise, "stagger": stagger,
-            "columns": columns, "clock": clock, "clockPos": clockPos,
+            "speed": speed, "columns": columns,
+            "fade": introMs * 0.30, "rise": 24, "stagger": introMs * 0.55,
+            "revealMs": introMs,
+            "clock": clock, "clockPos": clockPos,
             "clockSize": clockSize, "clockDate": clockDate,
             "clockFont": clockFont, "clockWeight": clockWeight,
             "clockGlass": clockGlass, "clockColor": clockColor,

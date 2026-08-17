@@ -410,9 +410,12 @@ function boot(PINS) {
     veil.canvas = c; veil.ctx = ctx;
     return { W, H, ctx };
   }
-  function veilGeom(W, H) {
+  function veilGeom(W, H, style) {
     const ox = introOrigin === 'bl' ? 0 : introOrigin === 'br' ? W : W / 2;
-    const oy = H;   // always rise from the bottom edge
+    // Radial: drop the centre well below the bottom edge so the arc that enters
+    // the screen is already wide and flat — you never see a small circle pop in.
+    // Dots keep their origin right at the bottom edge.
+    const oy = H + (style === 'radial' ? H * 0.9 : 0);
     const maxR = Math.max(Math.hypot(0 - ox, 0 - oy), Math.hypot(W - ox, 0 - oy),
                           Math.hypot(0 - ox, H - oy), Math.hypot(W - ox, H - oy));
     const feather = Math.hypot(W, H) * 0.55;   // very wide, very soft blurred edge
@@ -423,7 +426,7 @@ function boot(PINS) {
     viewport.querySelectorAll('img').forEach(i => { i.classList.remove('show'); i.classList.add('instant'); });
     const { W, H, ctx } = sizeVeil();
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);   // fully cover while we decode
-    veil.g = veilGeom(W, H); veil.style = introStyle;
+    veil.g = veilGeom(W, H, introStyle); veil.style = introStyle;
     decodeVisible(1200).then(() => {
       veil.start = 0; veil.lastDraw = 0; veil.active = true;
       stepVeil();   // paint frame 0 immediately
@@ -725,6 +728,7 @@ function boot(PINS) {
     if (cfg.clock  != null && window.pinwallSetClock) window.pinwallSetClock(!!cfg.clock);
     if (cfg.introStyle  != null) introStyle  = String(cfg.introStyle);
     if (cfg.introOrigin != null) introOrigin = String(cfg.introOrigin);
+    if (cfg.revealMs    != null) REVEAL_MS   = +cfg.revealMs;
   };
   // The app's "Start" button re-runs the entrance reveal with current settings.
   window.pinwallReplay = replayEntrance;
