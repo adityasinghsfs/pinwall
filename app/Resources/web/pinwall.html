@@ -26,6 +26,10 @@
   body.gallery .col img.show:hover, body.gallery .col img.instant:hover {
     transform: scale(1.03); box-shadow: 0 0 0 2px #fff; transition: transform 150ms ease; }
 
+  /* intro veil: a black canvas that recedes to reveal the fully-composed wall
+     (radial / dot-matrix intros). Above the wall + clock, below the tuner. */
+  #veil { position: fixed; inset: 0; z-index: 5000; display: none; pointer-events: none; }
+
   /* skeleton state: shown before any pins exist (native app, pre-login) */
   #skeleton { position: fixed; inset: 0; display: none; gap: var(--gap);
     padding: var(--gap); box-sizing: border-box; background: #000; }
@@ -282,6 +286,15 @@ function boot(PINS) {
   let staggerMs = pick('stagger', STAGGER_MS);
   let colOverride = pick('columns', 0);   // 0 = auto-fit by width (browser default)
   let startDelay = gallery ? 0 : pick('delay', START_DELAY);
+  // Intro reveal: 'bloom' (per-tile rise, original), 'radial' (masked wall that
+  // uncovers radially), 'radialDots' (same, dot-matrix edge). Origin: bc/bl/br.
+  const pickStr = (k, d) => {
+    if (NATIVE && NATIVE[k] != null && NATIVE[k] !== '') return String(NATIVE[k]);
+    const u = params.get(k); return (u != null && u !== '') ? u : d;
+  };
+  let introStyle  = pickStr('introStyle', pickStr('intro', 'bloom'));
+  let introOrigin = pickStr('introOrigin', pickStr('origin', 'bc'));
+  let REVEAL_MS = pick('revealMs', 1800);   // duration of the radial/dot reveal
 
   function persistParams() {
     const qs = `speed=${speed}&fade=${fadeMs}&rise=${risePx}&stagger=${staggerMs}`;
@@ -341,39 +354,177 @@ function boot(PINS) {
   }
 
   function fadeIn(img, delay) { img.style.transitionDelay = (delay || 0) + 'ms'; img.classList.add('show'); }
-  function paintThenFade(img, delay) {
-    const go = () => fadeIn(img, delay);
-    if (img.decode) img.decode().then(go).catch(go); else go();
+  const onScreenImg = img => { const r = img.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight; };
+  // Decode the currently-visible tiles (bounded by a timeout) so they're painted
+  // BEFORE we reveal them — this is what stops the "tiles pop in at random".
+  function decodeVisible(cap) {
+    const vis = [...viewport.querySelectorAll('img')].filter(onScreenImg);
+    const ps = vis.map(i => (i.decode ? i.decode().catch(() => {}) : Promise.resolve()));
+    return Promise.race([Promise.all(ps), new Promise(r => setTimeout(r, cap || 1400))]);
   }
-  function revealEntrance() {
+
+  // ---- entry point: pick the intro based on introStyle ----
+  let introRan = false;
+  function runIntro() {
+    if (introRan) return;            // fires from several drivers; only once
+    introRan = true;
+    if (introStyle === 'radial' || introStyle === 'radialDots') return veilReveal();
+    return bloomReveal();
+  }
+
+  // BLOOM: the original bottom-up per-tile fade, but decode-first so the order
+  // is deterministic (no random pop-in as images finish loading).
+  function bloomReveal() {
     const vh = window.innerHeight;
-    const onScreen = img => { const r = img.getBoundingClientRect(); return r.bottom > 0 && r.top < vh; };
-    viewport.querySelectorAll('img').forEach(img => {
-      if (img.complete && img.naturalHeight > 0) {
-        if (onScreen(img)) {
-          const r = img.getBoundingClientRect();
-          const t = Math.min(Math.max(r.top, 0), vh) / vh;
-          paintThenFade(img, staggerMs * (1 - t));
-        } else { img.classList.add('instant'); }
-      } else {
-        const done = () => { img.removeEventListener('load', done); img.removeEventListener('error', err);
-          if (onScreen(img)) paintThenFade(img, 0); else img.classList.add('instant'); };
-        const err = () => { img.removeEventListener('load', done); img.removeEventListener('error', err); img.classList.add('instant'); };
-        img.addEventListener('load', done);
-        img.addEventListener('error', err);
-        if (img.complete) { if (img.naturalHeight > 0) done(); else err(); }
-      }
+    const all = [...viewport.querySelectorAll('img')];
+    all.forEach(img => { if (!onScreenImg(img)) img.classList.add('instant'); });
+    decodeVisible(1400).then(() => {
+      all.filter(onScreenImg).forEach(img => {
+        const r = img.getBoundingClientRect();
+        const t = Math.min(Math.max(r.top, 0), vh) / vh;
+        fadeIn(img, staggerMs * (1 - t));   // higher tiles first
+      });
     });
     setTimeout(() => viewport.querySelectorAll('img:not(.show):not(.instant)')
       .forEach(i => i.classList.add('instant')), 8000);
   }
+
+  // RADIAL / DOT-MATRIX: compose the whole wall instantly, hide it under a black
+  // canvas "veil", then recede the veil outward from the chosen origin.
+  const veil = { active: false, style: 'radial', start: 0, canvas: null, ctx: null, g: null, sprite: null, lastDraw: 0 };
+  function veilCanvas() {
+    let c = document.getElementById('veil');
+    if (!c) { c = document.createElement('canvas'); c.id = 'veil'; document.body.appendChild(c); }
+    return c;
+  }
+  function sizeVeil() {
+    const c = veilCanvas(), dpr = Math.min(2, window.devicePixelRatio || 1);
+    const W = window.innerWidth, H = window.innerHeight;
+    c.style.display = 'block'; c.style.opacity = '1';
+    // CSS size MUST be set explicitly: without it a canvas renders at its backing
+    // size (W*dpr), so on Retina it drew at 2× width anchored top-left and the
+    // bottom-centre origin landed off to the right. Backing = W*dpr for crispness.
+    c.style.width = W + 'px'; c.style.height = H + 'px';
+    c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+    const ctx = c.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    veil.canvas = c; veil.ctx = ctx;
+    return { W, H, ctx };
+  }
+  function veilGeom(W, H) {
+    const ox = introOrigin === 'bl' ? 0 : introOrigin === 'br' ? W : W / 2;
+    const oy = H;   // always rise from the bottom edge
+    const maxR = Math.max(Math.hypot(0 - ox, 0 - oy), Math.hypot(W - ox, 0 - oy),
+                          Math.hypot(0 - ox, H - oy), Math.hypot(W - ox, H - oy));
+    const feather = Math.hypot(W, H) * 0.55;   // very wide, very soft blurred edge
+    return { W, H, ox, oy, maxR, feather };
+  }
+  const smooth = p => p * p * (3 - 2 * p);
+  function veilReveal() {
+    viewport.querySelectorAll('img').forEach(i => { i.classList.remove('show'); i.classList.add('instant'); });
+    const { W, H, ctx } = sizeVeil();
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);   // fully cover while we decode
+    veil.g = veilGeom(W, H); veil.style = introStyle;
+    decodeVisible(1200).then(() => {
+      veil.start = 0; veil.lastDraw = 0; veil.active = true;
+      stepVeil();   // paint frame 0 immediately
+      // rAF drives it in-app; the native saver host also calls stepVeil() from
+      // pinwallFrame (rAF is throttled there).
+      (function loop() { if (veil.active) { stepVeil(); requestAnimationFrame(loop); } })();
+    });
+  }
+  function stepVeil() {
+    if (!veil.active) return;
+    // Several drivers call this (rAF loop, the wall's tick, the native frame
+    // pump). Draw at most once per ~12ms so we never paint the veil twice in one
+    // frame.
+    const t0 = performance.now();
+    if (veil.lastDraw && t0 - veil.lastDraw < 12) return;
+    veil.lastDraw = t0;
+    const g = veil.g, ctx = veil.ctx; if (!g || !ctx) { veil.active = false; return; }
+    if (!veil.start) veil.start = performance.now();
+    const p = Math.min(1, (performance.now() - veil.start) / REVEAL_MS);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, g.W, g.H);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, g.W, g.H);   // black screen
+    if (veil.style === 'radialDots') drawDotsMask(ctx, g, p);
+    else drawRadialMask(ctx, g, p);
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    if (p >= 1) { veil.active = false; ctx.clearRect(0, 0, g.W, g.H); veil.canvas.style.opacity = '1'; veil.canvas.style.display = 'none'; }
+  }
+  // RADIAL: a soft-edged hole that grows from the origin. The wide feather band
+  // (multiple gradient stops) gives a very smooth, heavily-blurred edge.
+  function drawRadialMask(ctx, g, p) {
+    const R = smooth(p) * (g.maxR + g.feather);
+    const inner = Math.max(0, R - g.feather);
+    ctx.globalCompositeOperation = 'destination-out';
+    const grad = ctx.createRadialGradient(g.ox, g.oy, inner, g.ox, g.oy, R);
+    grad.addColorStop(0.0, 'rgba(0,0,0,1)');
+    grad.addColorStop(0.35, 'rgba(0,0,0,0.82)');
+    grad.addColorStop(0.65, 'rgba(0,0,0,0.40)');
+    grad.addColorStop(0.85, 'rgba(0,0,0,0.12)');
+    grad.addColorStop(1.0, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(g.ox, g.oy, R, 0, 6.2832); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  // DOT MATRIX: the entire screen is black with a grid of dots that are HOLES to
+  // the feed. A circle grows from the origin; inside it each dot grows in size AND
+  // opacity — biggest/most-open at the origin, fading to tiny/faint at the moving
+  // edge, nothing beyond it. By the time the circle passes a cell, its dot ramps
+  // to max and neighbouring holes merge → full feed.
+  // A soft round dot, rendered ONCE to an offscreen canvas. Stamping this with
+  // drawImage is far cheaper than building a radial gradient per dot per frame
+  // (that allocation was what made the dot intro lag).
+  // A dot that is a SOLID clear core with a thin soft rim (anti-alias). Stamped
+  // with destination-out at full opacity it punches a real hole → the wall shows
+  // at full brightness inside the dot, solid black between. No translucent film.
+  function dotSprite() {
+    if (veil.sprite) return veil.sprite;
+    const s = document.createElement('canvas'); s.width = s.height = 48;
+    const c = s.getContext('2d');
+    const gr = c.createRadialGradient(24, 24, 0, 24, 24, 24);
+    gr.addColorStop(0, 'rgba(0,0,0,1)');
+    gr.addColorStop(0.72, 'rgba(0,0,0,1)');   // solid core → crisp hole
+    gr.addColorStop(1, 'rgba(0,0,0,0)');       // thin soft rim
+    c.fillStyle = gr; c.fillRect(0, 0, 48, 48);
+    veil.sprite = s; return s;
+  }
+  function drawDotsMask(ctx, g, p) {
+    const cell = 30;
+    const rMin = cell * 0.10;                    // tiny dot as the front arrives
+    const rMerge = cell * 0.95;                  // grown enough to merge → full wall
+    const band = g.maxR * 0.45;                  // width of the small-dot leading edge
+    const lrFull = 1.9;                          // dots keep growing this far behind the front
+    // One continuous front: R sweeps far enough that the LAST cell also reaches
+    // full growth (lrFull) exactly at p=1 — so each dot grows small→merged in a
+    // single motion and there's no "circle fills, THEN dots expand" second step.
+    const R = smooth(p) * (g.maxR + lrFull * band);
+    const sp = dotSprite();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.globalAlpha = 1;                         // full-clear holes
+    let row = 0;
+    for (let y = cell / 2; y < g.H + cell; y += cell, row++) {
+      const xoff = (row % 2) ? cell / 2 : 0;     // stagger alternate rows (hex packing)
+      for (let x = cell / 2 + xoff; x < g.W + cell; x += cell) {
+        const d = Math.hypot(x - g.ox, y - g.oy);
+        const lr = (R - d) / band;               // distance behind the front, in bands
+        if (lr <= 0) continue;
+        const t = Math.min(1, lr / lrFull);      // 0 at the front → 1 fully grown/merged
+        const radius = rMin + (rMerge - rMin) * smooth(t);
+        ctx.drawImage(sp, x - radius, y - radius, radius * 2, radius * 2);
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
   function replayEntrance() {
+    veil.active = false;
+    const c = document.getElementById('veil'); if (c) c.style.display = 'none';
     const imgs = viewport.querySelectorAll('img');
     imgs.forEach(img => { img.style.transition = 'none'; img.classList.remove('show', 'instant'); img.style.transitionDelay = ''; });
     void viewport.offsetWidth;
     imgs.forEach(img => { img.style.transition = ''; });
     void viewport.offsetWidth;
-    requestAnimationFrame(() => requestAnimationFrame(revealEntrance));
+    introRan = false;
+    requestAnimationFrame(() => requestAnimationFrame(runIntro));
   }
   function remeasure() {
     columns.forEach((c) => { const h = c.el.scrollHeight / 2; if (h > 0) c.loopHeight = h; });
@@ -421,10 +572,11 @@ function boot(PINS) {
   function tick(now) {
     rafId = requestAnimationFrame(tick);
     window.__beats = (window.__beats || 0) + 1;   // rAF liveness heartbeat for the native host
-    if (pendingReveal) {                          // first composited frame: bloom is visible now
+    if (pendingReveal) {                          // first composited frame: intro is visible now
       pendingReveal = false;
-      setTimeout(revealEntrance, startDelay);
+      setTimeout(runIntro, startDelay);
     }
+    if (veil.active) stepVeil();
     frame(now);
   }
   function startLoop() {
@@ -571,6 +723,8 @@ function boot(PINS) {
       if (c !== colOverride) { colOverride = c; build(); }   // relayout on column change
     }
     if (cfg.clock  != null && window.pinwallSetClock) window.pinwallSetClock(!!cfg.clock);
+    if (cfg.introStyle  != null) introStyle  = String(cfg.introStyle);
+    if (cfg.introOrigin != null) introOrigin = String(cfg.introOrigin);
   };
   // The app's "Start" button re-runs the entrance reveal with current settings.
   window.pinwallReplay = replayEntrance;
@@ -586,7 +740,7 @@ function boot(PINS) {
       // invisibly. Wait for the first real composited frame (tick), THEN bloom.
       pendingReveal = true;
     } else {
-      setTimeout(revealEntrance, startDelay);
+      setTimeout(runIntro, startDelay);
     }
   }
   window.addEventListener('pageshow', () => { start(); startLoop(); });
@@ -630,7 +784,10 @@ function boot(PINS) {
   };
   window.pinwallFrame = function (now) {
     extFrames++;
-    if (!revealKicked && extFrames > 30) window.pinwallRevealNow();   // ~1s fallback
+    // Kick the intro from the native driver: in the saver appex rAF is throttled,
+    // so the page's own tick() may never consume pendingReveal. Wait a couple of
+    // composited frames (compositor awake), then run it. runIntro is idempotent.
+    if (!revealKicked && extFrames > 3) { revealKicked = true; runIntro(); }
     // remeasure columns while images stream in — the page's own debounce timer
     // is frozen in the saver host, so loop heights would otherwise go stale
     if (extFrames === 30 || extFrames === 90 || extFrames === 300) remeasure();
@@ -646,6 +803,7 @@ function boot(PINS) {
     }
     // clock repaint (~1/s): DOM timers are suspended in the saver host too
     if (extFrames % 30 === 0 && window.pinwallClockTick) window.pinwallClockTick();
+    if (veil.active) stepVeil();   // drive the radial reveal in the throttled saver appex
     frame(typeof now === 'number' ? now : performance.now());
   };
   // last-resort visibility: if nothing ever revealed, force the tiles on

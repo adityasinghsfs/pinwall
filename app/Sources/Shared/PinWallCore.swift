@@ -229,13 +229,16 @@ public struct WallSettings: Equatable {
     public var pinTarget: Double   // how many pins each refresh collects
     public var connected: Bool     // has the user connected their Pinterest?
     public var source: String      // "feed" or a board URL to harvest from
+    public var introStyle: String  // entrance: "bloom" | "radial" | "radialDots"
+    public var introOrigin: String // radial reveal origin: "bc" | "bl" | "br"
 
     public init(speed: Double, fade: Double, rise: Double, stagger: Double,
                 columns: Double, topBlur: Double, chroma: Double,
                 clock: Bool, clockPos: String, clockSize: Double, clockDate: Bool,
                 clockFont: String, clockWeight: Double, clockGlass: Bool, clockColor: String,
                 chargerOnly: Bool, refreshMins: Double = 60, pinTarget: Double = 100,
-                connected: Bool, source: String) {
+                connected: Bool, source: String,
+                introStyle: String = "bloom", introOrigin: String = "bc") {
         self.speed = speed; self.fade = fade; self.rise = rise; self.stagger = stagger
         self.columns = columns; self.topBlur = topBlur; self.chroma = chroma
         self.clock = clock; self.clockPos = clockPos; self.clockSize = clockSize; self.clockDate = clockDate
@@ -245,6 +248,8 @@ public struct WallSettings: Equatable {
         self.refreshMins = refreshMins; self.pinTarget = pinTarget
         self.connected = connected
         self.source = source
+        self.introStyle = introStyle
+        self.introOrigin = introOrigin
     }
 
     /// Tuning defaults (everything except the Pinterest connection).
@@ -266,6 +271,7 @@ public struct WallSettings: Equatable {
         clockPos = "tc"; clockSize = 100; clockDate = true
         clockFont = "system"; clockWeight = 200; clockGlass = false; clockColor = "#FFFFFF"
         chargerOnly = false; refreshMins = 60; pinTarget = 100
+        introStyle = "bloom"; introOrigin = "bc"
     }
 
     private static var store: UserDefaults { UserDefaults(suiteName: PinWall.suiteName) ?? .standard }
@@ -289,7 +295,9 @@ public struct WallSettings: Equatable {
             chargerOnly: d.bool(forKey: "chargerOnly"),
             refreshMins: dbl("refreshMins", 60), pinTarget: dbl("pinTarget", 100),
             connected: d.bool(forKey: "connected"),
-            source: d.string(forKey: "source") ?? FeedSource.feed)
+            source: d.string(forKey: "source") ?? FeedSource.feed,
+            introStyle: d.string(forKey: "introStyle") ?? "bloom",
+            introOrigin: d.string(forKey: "introOrigin") ?? "bc")
     }
     public func save() {
         let d = WallSettings.store
@@ -305,6 +313,8 @@ public struct WallSettings: Equatable {
         d.set(refreshMins, forKey: "refreshMins"); d.set(pinTarget, forKey: "pinTarget")
         d.set(connected, forKey: "connected")
         d.set(source, forKey: "source")
+        d.set(introStyle, forKey: "introStyle")
+        d.set(introOrigin, forKey: "introOrigin")
         PinWall.publishSaverMirror()   // keep the screensaver's file mirror fresh
     }
     /// Object literal for injecting into the page as `window.PINWALL_CONFIG`.
@@ -321,6 +331,7 @@ public struct WallSettings: Equatable {
             "clockSize": clockSize, "clockDate": clockDate,
             "clockFont": clockFont, "clockWeight": clockWeight,
             "clockGlass": clockGlass, "clockColor": clockColor,
+            "introStyle": introStyle, "introOrigin": introOrigin,
             "gallery": gallery, "skeleton": skeleton, "app": app,
             "hideWall": hideWall, "reload": reload,
         ]

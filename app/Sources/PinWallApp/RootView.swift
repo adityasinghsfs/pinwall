@@ -355,14 +355,26 @@ struct RootView: View {
             slider("Rise", value: $settings.rise, range: 0...120, unit: "px")
             slider("Stagger", value: $settings.stagger, range: 0...1500, unit: "ms")
             slider("Columns", value: $settings.columns, range: 3...10, unit: "", step: 1)
+            pickerRow("Intro", selection: introStyleBinding) {
+                Text("Bloom").tag("bloom")
+                Text("Radial").tag("radial")
+                Text("Radial dots").tag("radialDots")
+            }
+            if settings.introStyle == "radial" || settings.introStyle == "radialDots" {
+                pickerRow("Reveal from", selection: introOriginBinding) {
+                    Text("Bottom center").tag("bc")
+                    Text("Bottom left").tag("bl")
+                    Text("Bottom right").tag("br")
+                }
+            }
             Button {
-                Installer.startScreenSaver()
+                PreviewController.shared.show()
             } label: {
                 Label("Preview", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(GlassButtonStyle(tint: .pink))
-            .help("Start the screensaver full-screen (install & select PinWall first)")
+            .help("Full-screen preview of the wall — press Esc to exit. Doesn’t lock your screen.")
         }
     }
 
@@ -374,6 +386,14 @@ struct RootView: View {
     private var clockPosBinding: Binding<String> {
         Binding(get: { settings.clockPos },
                 set: { settings.clockPos = $0; settings.save() })
+    }
+    private var introStyleBinding: Binding<String> {
+        Binding(get: { settings.introStyle },
+                set: { settings.introStyle = $0; settings.save(); replayToken += 1 })
+    }
+    private var introOriginBinding: Binding<String> {
+        Binding(get: { settings.introOrigin },
+                set: { settings.introOrigin = $0; settings.save(); replayToken += 1 })
     }
 
     private var fontBinding: Binding<String> {
