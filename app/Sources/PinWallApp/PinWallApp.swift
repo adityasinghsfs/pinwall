@@ -74,6 +74,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Updates are user-driven: no launch-time prompt. The settings panel's
         // "Check for updates" button is the only trigger, so an update never
         // interrupts on launch.
+
+        // First launch after an update → a friendly "what's new" card (never on
+        // a brand-new install).
+        let hasData = s0.connected || !s0.icloudURL.isEmpty || !PinStore.load().isEmpty
+        WhatsNew.presentIfNeeded(current: appVersionString, hasPriorData: hasData)
+    }
+
+    private var appVersionString: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
