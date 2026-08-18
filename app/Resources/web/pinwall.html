@@ -304,6 +304,7 @@ function boot(PINS) {
   let introStyle  = pickStr('introStyle', pickStr('intro', 'bloom'));
   let introOrigin = pickStr('introOrigin', pickStr('origin', 'bc'));
   let REVEAL_MS = pick('revealMs', 1800);   // duration of the radial/dot reveal
+  let feedAngle = pick('feedAngle', 0);     // tilt the scrolling axis, degrees
 
   function persistParams() {
     const qs = `speed=${speed}&fade=${fadeMs}&rise=${risePx}&stagger=${staggerMs}`;
@@ -325,6 +326,22 @@ function boot(PINS) {
   if (NATIVE && NATIVE.app) document.body.classList.add('app');
 
   const viewport = document.getElementById('viewport');
+
+  // Feed angle: tilt the whole scrolling axis. Rotating the viewport would leave
+  // black triangles at the corners, so scale it up just enough to still cover the
+  // screen at that angle (same idea as the marketing wall's rotate+scale). Only
+  // the feed tilts — the clock overlay lives outside #viewport and stays upright.
+  function coverScale(deg) {
+    if (!deg) return 1;
+    const r = Math.abs(deg) * Math.PI / 180, W = innerWidth, H = innerHeight;
+    return Math.max((W * Math.cos(r) + H * Math.sin(r)) / W,
+                    (H * Math.cos(r) + W * Math.sin(r)) / H);
+  }
+  function applyFeedAngle() {
+    viewport.style.transformOrigin = '50% 50%';
+    viewport.style.transform = feedAngle
+      ? `rotate(${feedAngle}deg) scale(${coverScale(feedAngle).toFixed(4)})` : '';
+  }
 
   if (showSkeleton) {
     renderSkeleton();
@@ -357,6 +374,7 @@ function boot(PINS) {
       columns.push({ el: col, loopHeight: 0, phase: ci * 173 });
     });
     remeasure();
+    applyFeedAngle();                 // keep the tilt (and its cover-scale) after relayout
     if (running) setPromoted(true);   // columns are new objects; re-promote them
     if (firstBuild) { firstBuild = false; }
     else { viewport.querySelectorAll('img').forEach(img => img.classList.add('instant')); }
@@ -802,6 +820,7 @@ function boot(PINS) {
     if (cfg.introStyle  != null) introStyle  = String(cfg.introStyle);
     if (cfg.introOrigin != null) introOrigin = String(cfg.introOrigin);
     if (cfg.revealMs    != null) REVEAL_MS   = +cfg.revealMs;
+    if (cfg.feedAngle   != null) { feedAngle = +cfg.feedAngle; applyFeedAngle(); }
   };
   // The app's "Start" button re-runs the entrance reveal with current settings.
   window.pinwallReplay = replayEntrance;

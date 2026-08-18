@@ -534,6 +534,9 @@ struct RootView: View {
                        step: 10, onCommit: { settings.save() })
             DialSlider(label: "Columns", value: $settings.columns, range: 3...10,
                        step: 1, onCommit: { settings.save() })
+            // Centred at 0 = straight; ±30° tilts the scrolling axis left/right.
+            DialSlider(label: "Tilt", value: $settings.feedAngle, range: -30...30,
+                       step: 1, unit: "°", onCommit: { settings.save() })
         }
     }
 

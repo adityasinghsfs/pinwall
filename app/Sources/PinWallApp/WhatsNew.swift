@@ -14,6 +14,11 @@ struct WhatsNewFeature: Identifiable {
 enum WhatsNew {
     /// Highlights per version, newest first. Add an entry each release.
     static let byVersion: [(version: String, features: [WhatsNewFeature])] = [
+        ("1.1.3", [
+            WhatsNewFeature(icon: "line.diagonal",
+                            title: "Tilt your wall",
+                            blurb: "A new Tilt dial angles the whole feed up to 30° either way — for that diagonal, dynamic look."),
+        ]),
         ("1.1.2", [
             WhatsNewFeature(icon: "arrow.down.circle",
                             title: "Updates just happen",
@@ -64,7 +69,14 @@ enum WhatsNew {
 
     private static func show(version: String, features: [WhatsNewFeature]) {
         if window != nil { return }
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
+        // Size to content, capped to the screen — the header + CTA are fixed and
+        // the feature list scrolls if it would overflow, so the CTA is never clipped.
+        let screenH = NSScreen.main?.visibleFrame.height ?? 900
+        let chrome: CGFloat = 250            // header + button + paddings
+        let perFeature: CGFloat = 74
+        let height = min(chrome + CGFloat(features.count) * perFeature, screenH - 80)
+
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: height),
                            styleMask: [.titled, .closable, .fullSizeContentView],
                            backing: .buffered, defer: false)
         win.titlebarAppearsTransparent = true
@@ -101,6 +113,7 @@ private struct WhatsNewView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // header — fixed
             VStack(alignment: .leading, spacing: 6) {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable().frame(width: 46, height: 46)
@@ -116,37 +129,40 @@ private struct WhatsNewView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Dial.textMuted)
             }
-            .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 22)
+            .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 18)
 
-            VStack(spacing: 12) {
-                ForEach(features) { f in
-                    HStack(alignment: .top, spacing: 14) {
-                        Image(systemName: f.icon)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Dial.accent)
-                            .frame(width: 38, height: 38)
-                            .background(Dial.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Dial.stroke, lineWidth: 1))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(f.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Dial.textRoot)
-                            Text(f.blurb).font(.system(size: 12.5)).foregroundStyle(Dial.textMuted)
-                                .fixedSize(horizontal: false, vertical: true)
+            // features — scroll if they'd overflow, so the CTA is never clipped
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 12) {
+                    ForEach(features) { f in
+                        HStack(alignment: .top, spacing: 14) {
+                            Image(systemName: f.icon)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Dial.accent)
+                                .frame(width: 38, height: 38)
+                                .background(Dial.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Dial.stroke, lineWidth: 1))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(f.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Dial.textRoot)
+                                Text(f.blurb).font(.system(size: 12.5)).foregroundStyle(Dial.textMuted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
                     }
                 }
+                .padding(.horizontal, 24).padding(.vertical, 4)
             }
-            .padding(.horizontal, 24)
+            .frame(maxHeight: .infinity)
 
-            Spacer(minLength: 20)
-
+            // CTA — fixed, always visible
             Button(action: onDone) {
                 Text("Let's go").frame(maxWidth: .infinity)
             }
             .buttonStyle(DialButtonStyle(accent: true))
-            .padding(.horizontal, 24).padding(.bottom, 24)
+            .padding(.horizontal, 24).padding(.top, 14).padding(.bottom, 24)
         }
-        .frame(width: 420, height: 520, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             LinearGradient(colors: [Color(red: 0.10, green: 0.03, blue: 0.05),
                                     Color(red: 0.04, green: 0.03, blue: 0.03)],

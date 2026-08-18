@@ -271,6 +271,7 @@ public struct WallSettings: Equatable {
     public var introStyle: String  // entrance: "bloom" | "radial" | "radialDots"
     public var introOrigin: String // radial reveal origin: "bc" | "bl" | "br"
     public var introMs: Double     // intro duration in ms (1000–3000)
+    public var feedAngle: Double   // tilt the scrolling axis, degrees (-30…30, 0 = straight)
     public var provider: String    // photo source: "pinterest" | "icloud"
     public var icloudURL: String   // public iCloud Shared Album link ("" = not linked)
 
@@ -281,6 +282,7 @@ public struct WallSettings: Equatable {
                 chargerOnly: Bool, refreshMins: Double = 60, pinTarget: Double = 100,
                 connected: Bool, source: String,
                 introStyle: String = "bloom", introOrigin: String = "bc", introMs: Double = 1800,
+                feedAngle: Double = 0,
                 provider: String = "pinterest", icloudURL: String = "") {
         self.speed = speed; self.fade = fade; self.rise = rise; self.stagger = stagger
         self.columns = columns; self.topBlur = topBlur; self.chroma = chroma
@@ -294,6 +296,7 @@ public struct WallSettings: Equatable {
         self.introStyle = introStyle
         self.introOrigin = introOrigin
         self.introMs = introMs
+        self.feedAngle = feedAngle
         self.provider = provider
         self.icloudURL = icloudURL
     }
@@ -317,7 +320,7 @@ public struct WallSettings: Equatable {
         clockPos = "tc"; clockSize = 100; clockDate = true
         clockFont = "system"; clockWeight = 200; clockGlass = false; clockColor = "#FFFFFF"
         chargerOnly = false; refreshMins = 60; pinTarget = 100
-        introStyle = "bloom"; introOrigin = "bc"; introMs = 1800
+        introStyle = "bloom"; introOrigin = "bc"; introMs = 1800; feedAngle = 0
     }
 
     private static var store: UserDefaults { UserDefaults(suiteName: PinWall.suiteName) ?? .standard }
@@ -345,6 +348,7 @@ public struct WallSettings: Equatable {
             introStyle: d.string(forKey: "introStyle") ?? "bloom",
             introOrigin: d.string(forKey: "introOrigin") ?? "bc",
             introMs: dbl("introMs", 1800),
+            feedAngle: dbl("feedAngle", 0),
             provider: d.string(forKey: "provider") ?? "pinterest",
             icloudURL: d.string(forKey: "icloudURL") ?? "")
     }
@@ -365,6 +369,7 @@ public struct WallSettings: Equatable {
         d.set(introStyle, forKey: "introStyle")
         d.set(introOrigin, forKey: "introOrigin")
         d.set(introMs, forKey: "introMs")
+        d.set(feedAngle, forKey: "feedAngle")
         d.set(provider, forKey: "provider")
         d.set(icloudURL, forKey: "icloudURL")
         PinWall.publishSaverMirror()   // keep the screensaver's file mirror fresh
@@ -387,7 +392,7 @@ public struct WallSettings: Equatable {
             "clockSize": clockSize, "clockDate": clockDate,
             "clockFont": clockFont, "clockWeight": clockWeight,
             "clockGlass": clockGlass, "clockColor": clockColor,
-            "introStyle": introStyle, "introOrigin": introOrigin,
+            "introStyle": introStyle, "introOrigin": introOrigin, "feedAngle": feedAngle,
             "gallery": gallery, "skeleton": skeleton, "app": app,
             "hideWall": hideWall, "reload": reload,
         ]
