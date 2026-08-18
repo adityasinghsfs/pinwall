@@ -476,7 +476,8 @@ function boot(PINS) {
     const feather = Math.hypot(W, H) * 0.55;   // very wide, very soft blurred edge
     return { W, H, ox, oy, maxR, feather };
   }
-  const smooth = p => p * p * (3 - 2 * p);
+  const smooth = p => p * p * (3 - 2 * p);          // ease-in-out (radial front)
+  const easeOut = p => 1 - Math.pow(1 - p, 3);      // cubic ease-out (dots front)
   function veilReveal() {
     // Only LOADED tiles snap on (they're hidden under the veil anyway);
     // stragglers fade in as they arrive so nothing pops in raw post-reveal.
@@ -562,14 +563,17 @@ function boot(PINS) {
     // One continuous front: R sweeps far enough that the LAST cell also reaches
     // full growth (lrFull) exactly at p=1 — so each dot grows small→merged in a
     // single motion and there's no "circle fills, THEN dots expand" second step.
-    const R = smooth(p) * (g.maxR + lrFull * band);
+    const R = easeOut(p) * (g.maxR + lrFull * band);   // dots rush out, then settle
     const sp = dotSprite();
     ctx.globalCompositeOperation = 'destination-out';
     ctx.globalAlpha = 1;                         // full-clear holes
+    // Start a full cell BEYOND every edge so edge cells are covered by dots
+    // centred off-screen too — otherwise the outermost dots have no neighbour to
+    // merge into and leave a dotty seam along the left/top edges.
     let row = 0;
-    for (let y = cell / 2; y < g.H + cell; y += cell, row++) {
+    for (let y = -cell; y < g.H + cell; y += cell, row++) {
       const xoff = (row % 2) ? cell / 2 : 0;     // stagger alternate rows (hex packing)
-      for (let x = cell / 2 + xoff; x < g.W + cell; x += cell) {
+      for (let x = -cell + xoff; x < g.W + cell; x += cell) {
         const d = Math.hypot(x - g.ox, y - g.oy);
         const lr = (R - d) / band;               // distance behind the front, in bands
         if (lr <= 0) continue;

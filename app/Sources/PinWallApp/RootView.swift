@@ -556,7 +556,7 @@ struct RootView: View {
                 Text("Radial").tag("radial")
                 Text("Radial dots").tag("radialDots")
             }
-            DialSlider(label: "Duration", value: $settings.introMs, range: 1000...3000,
+            DialSlider(label: "Duration", value: $settings.introMs, range: 1000...4000,
                        step: 100, unit: "ms", onCommit: { settings.save() })
             if settings.introStyle == "radial" || settings.introStyle == "radialDots" {
                 pickerRow("Reveal from", selection: introOriginBinding) {

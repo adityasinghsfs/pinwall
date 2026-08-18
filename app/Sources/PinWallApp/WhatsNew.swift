@@ -14,6 +14,11 @@ struct WhatsNewFeature: Identifiable {
 enum WhatsNew {
     /// Highlights per version, newest first. Add an entry each release.
     static let byVersion: [(version: String, features: [WhatsNewFeature])] = [
+        ("1.1.4", [
+            WhatsNewFeature(icon: "slider.horizontal.3",
+                            title: "Smoother, longer intros",
+                            blurb: "The dot reveal now eases out gracefully, cleans up its edges, and can run up to 4 seconds."),
+        ]),
         ("1.1.3", [
             WhatsNewFeature(icon: "line.diagonal",
                             title: "Tilt your wall",
