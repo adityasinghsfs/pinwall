@@ -15,6 +15,17 @@ import WebKit
 /// settings.js) and this view loads that file URL directly — the exact pattern
 /// the old WebViewScreenSaver setup used on this machine for months.
 @objc(PinWallSaverView)
+/// Receives the wall page's stats deltas (a WKUserContentController retains its
+/// handlers strongly, so a shared sink avoids retaining the saver view itself).
+final class StatsSink: NSObject, WKScriptMessageHandler {
+    static let shared = StatsSink()
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "pinwall", let d = message.body as? [String: Any],
+              (d["type"] as? String) == "stats" else { return }
+        WallStats.add(pins: (d["pins"] as? Double) ?? 0, secs: (d["secs"] as? Double) ?? 0)
+    }
+}
+
 final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
     private var web: WKWebView!
     private var loaded = false
@@ -37,7 +48,10 @@ final class PinWallSaverView: ScreenSaverView, WKNavigationDelegate {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
 
-        let web = WKWebView(frame: bounds, configuration: WKWebViewConfiguration())
+        let cfg = WKWebViewConfiguration()
+        // stats bridge: the page posts lifetime {pins, secs} deltas
+        cfg.userContentController.add(StatsSink.shared, name: "pinwall")
+        let web = WKWebView(frame: bounds, configuration: cfg)
         web.autoresizingMask = [.width, .height]
         web.wantsLayer = true
         if #available(macOS 12.0, *) { web.underPageBackgroundColor = .black }

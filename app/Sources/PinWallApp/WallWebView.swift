@@ -17,6 +17,8 @@ struct WallWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
+        // stats bridge: the page posts {type:'stats', pins, secs} deltas
+        cfg.userContentController.add(context.coordinator, name: "pinwall")
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.wantsLayer = true
         if #available(macOS 12.0, *) { web.underPageBackgroundColor = .black }
@@ -72,11 +74,17 @@ struct WallWebView: NSViewRepresentable {
         web.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
     }
 
-    final class Coordinator: NSObject, WKUIDelegate {
+    final class Coordinator: NSObject, WKUIDelegate, WKScriptMessageHandler {
         weak var web: WKWebView?
         var lastToken = 0
         var lastReplayToken = 0
         var lastDrainToken = 0
+        // page → host: lifetime stats deltas (and tuner posts, which we ignore)
+        func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "pinwall", let d = message.body as? [String: Any],
+                  (d["type"] as? String) == "stats" else { return }
+            WallStats.add(pins: (d["pins"] as? Double) ?? 0, secs: (d["secs"] as? Double) ?? 0)
+        }
         // In gallery mode, a pin click calls window.open — send it to the browser.
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction,

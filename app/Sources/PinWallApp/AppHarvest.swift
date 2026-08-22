@@ -15,9 +15,11 @@ enum AppHarvest {
     private static var running = false
     private static var completed = false
 
+    /// completion count: pins loaded; -1 = another harvest holds the lock (busy,
+    /// NOT a failure — callers should say so instead of "couldn't load").
     static func run(source: String, completion: @escaping (Int) -> Void) {
-        guard !running else { completion(0); return }
-        guard HarvestLock.acquire() else { completion(0); return }   // background harvest active
+        guard !running else { completion(-1); return }
+        guard HarvestLock.acquire() else { completion(-1); return }   // background harvest active
         begin()
         let s = makeScraper()
         let target = Int(WallSettings.load().pinTarget)
@@ -66,9 +68,11 @@ enum AppHarvest {
         let s = makeScraper()
         watchdog { completion(BoardStore.load()) }
         Task { @MainActor in
-            let boards = await s.discoverBoards()
-            if !boards.isEmpty { BoardStore.save(boards) }
-            done { completion(boards.isEmpty ? BoardStore.load() : boards) }
+            let discovered = await s.discoverBoards()
+            // Rebuild from scratch: discovery is the source of truth. Only an
+            // EMPTY result keeps the old list (a failed fetch shouldn't wipe it).
+            if !discovered.isEmpty { BoardStore.save(discovered) }
+            done { completion(discovered.isEmpty ? BoardStore.load() : discovered) }
         }
     }
 

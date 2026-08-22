@@ -16,12 +16,28 @@ struct RootView: View {
     @State private var newBoardURL = ""
     @State private var providerTab = WallSettings.load().provider
     @State private var drainToken = 0
+    // Panel docking: drag it across the central axis to snap to the other side.
+    @State private var panelOnRight: Bool = {
+        let d = UserDefaults(suiteName: PinWall.suiteName)
+        return d?.object(forKey: "panelOnRight") == nil ? true : d!.bool(forKey: "panelOnRight")
+    }()
+    // Auto-resets even if the gesture is CANCELLED. The resetTransaction is the
+    // key bit: without it the end-of-gesture reset to 0 is un-animated, so the
+    // panel teleported back to its old edge on release instead of gliding.
+    @GestureState(initialValue: CGFloat(0),
+                  resetTransaction: Transaction(animation: .spring(response: 0.35,
+                                                                   dampingFraction: 0.8)))
+    private var panelDragX: CGFloat
+    @State private var panelShadowOn = true              // fades during the drag
+    @State private var shadowRestore: DispatchWorkItem?  // cancellable, so a new drag can't be re-lit
+    @State private var saverSetupDone = UserDefaults(suiteName: PinWall.suiteName)?.bool(forKey: "saverSetupDone") ?? false
     @State private var icloudLink = ""
     @State private var icloudStatus: String?
     @State private var icloudLoading = false
     @StateObject private var updater = Updater.shared
 
     var body: some View {
+        GeometryReader { geo in
         ZStack(alignment: .bottomTrailing) {
             WallWebView(gallery: browseMode, settings: settings,
                         reloadToken: reloadToken, replayToken: replayToken,
@@ -34,14 +50,19 @@ struct RootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .ignoresSafeArea()
 
-            // subtle right-edge darkening so the glass panel always reads
+            // subtle edge darkening (mirrors the panel's side) so the glass reads;
+            // fades with the shadow while the panel is in flight
             if showPanel && !browseMode {
-                LinearGradient(colors: [.clear, .black.opacity(0.45)],
+                LinearGradient(colors: panelOnRight ? [.clear, .black.opacity(0.45)]
+                                                    : [.black.opacity(0.45), .clear],
                                startPoint: .leading, endPoint: .trailing)
-                    .frame(width: 420)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .frame(width: min(420, geo.size.width))
+                    .frame(maxWidth: .infinity, alignment: panelOnRight ? .trailing : .leading)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+                    // fades with the shadow so the edge darkening doesn't sit at
+                    // the OLD edge while the panel is mid-flight
+                    .opacity(panelShadowOn ? 1 : 0)
                     .transition(.opacity)
             }
 
@@ -49,17 +70,51 @@ struct RootView: View {
                 settingsPanel
                     .frame(width: 320)
                     .frame(maxHeight: .infinity, alignment: .top)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.trailing, 20)
-                    .padding(.top, 44)
-                    .padding(.bottom, 20)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: panelOnRight ? .trailing : .leading)
+                    .padding(panelOnRight ? .trailing : .leading, 12)
+                    .offset(x: panelDragX)
+                    .onChange(of: panelDragX) { v in
+                        if v != 0 {
+                            // in flight: kill any pending restore so a stale timer
+                            // can't re-light the shadow mid-drag
+                            shadowRestore?.cancel(); shadowRestore = nil
+                            if panelShadowOn {
+                                withAnimation(.easeOut(duration: 0.12)) { panelShadowOn = false }
+                            }
+                        } else if !panelShadowOn {
+                            // landed (or cancelled) → shadow returns at the new edge
+                            shadowRestore?.cancel()
+                            let work = DispatchWorkItem {
+                                withAnimation(.easeIn(duration: 0.3)) { panelShadowOn = true }
+                            }
+                            shadowRestore = work
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+                        }
+                    }
+                    .transition(.move(edge: panelOnRight ? .trailing : .leading).combined(with: .opacity))
+                    .gesture(
+                        // Drag the panel; on release it snaps to whichever side
+                        // of the screen's central axis it landed on.
+                        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+                            .updating($panelDragX) { g, state, _ in state = g.translation.width }
+                            .onEnded { g in
+                                let centreX = (panelOnRight ? geo.size.width - 12 - 160 : 12 + 160)
+                                              + g.translation.width
+                                let toRight = centreX > geo.size.width / 2
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                    panelOnRight = toRight
+                                }
+                                UserDefaults(suiteName: PinWall.suiteName)?
+                                    .set(toRight, forKey: "panelOnRight")
+                            }
+                    )
             }
 
             if !browseMode {
-                // buttons slide left out of the panel's way when it's open
+                // buttons dodge the panel only when it's docked on their side
                 floatingButtons
-                    .padding(.trailing, showPanel ? 356 : 20)
+                    .padding(.trailing, (showPanel && panelOnRight) ? 336 : 20)
                     .padding(.bottom, 20)
             }
 
@@ -72,7 +127,14 @@ struct RootView: View {
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: showPanel)
         .animation(.easeInOut(duration: 0.25), value: browseMode)
-        .frame(minWidth: 940, minHeight: 620)
+        }
+        // the whole stage spans the raw window — geo.size is the true window
+        // size and children lay out from its actual edges (no titlebar inset).
+        // NO layout minWidth here: an oversized layout gets CENTERED by SwiftUI
+        // in a smaller window and overhangs BOTH edges — that was the panel-
+        // off-the-edge bug. The usable minimum lives on the NSWindow instead.
+        .ignoresSafeArea()
+        .background(WindowConfigurator())
         .onChange(of: browseMode) { isOn in
             if isOn {
                 keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -120,8 +182,9 @@ struct RootView: View {
 
     private var settingsPanel: some View {
         VStack(spacing: 0) {
-            dialTitlebar
-                .padding(.horizontal, 14).padding(.top, 13).padding(.bottom, 9)
+            // window controls live in the panel (Apple TV style)
+            trafficDots
+                .padding(.horizontal, 14).padding(.top, 13).padding(.bottom, 2)
             DialTabs(tab: $providerTab) { id in
                 guard id != settings.provider else { return }
                 // Caches are written ONLY by harvests (and the launch-time seed),
@@ -132,31 +195,53 @@ struct RootView: View {
                 PinStore.activate(provider: id)
                 reloadToken += 1
             }
-            .padding(.horizontal, 12).padding(.bottom, 4)
+            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
             ScrollView(.vertical, showsIndicators: false) {
+                // HOT ZONE flat on the panel; everything set-once lives in ADVANCED.
                 VStack(alignment: .leading, spacing: 0) {
-                    connectionFolder
+                    sourceSection
+                        .padding(.top, 10)
+                    Divider().overlay(Dial.stroke).padding(.top, 12)
+                    dialsSection
+                        .padding(.vertical, 10)
                     Divider().overlay(Dial.stroke)
-                    wallSection
+                    quickRows
+                        .padding(.vertical, 8)
                     Divider().overlay(Dial.stroke)
-                    introSection
-                    Divider().overlay(Dial.stroke)
-                    effectsSection
-                    Divider().overlay(Dial.stroke)
-                    behaviourSection
-                    Divider().overlay(Dial.stroke)
-                    installSection
-                    footer
+                    if !saverSetupDone {
+                        // first-run: keep the one-time setup front and centre
+                        // until it's been clicked, then it lives in ADVANCED.
+                        Button { runSaverSetup() } label: {
+                            Label("Set up PinWall screensaver", systemImage: "menubar.dock.rectangle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(DialButtonStyle(accent: true))
+                        .padding(.vertical, 10)
+                        if let s = installStatus {
+                            Text(s).font(.system(size: 11)).foregroundStyle(Dial.textSection)
+                                .padding(.bottom, 8)
+                        }
+                        Divider().overlay(Dial.stroke)
+                    }
+                    advancedFolder
+                    slimFooter
                 }
                 .padding(.horizontal, 12).padding(.bottom, 12)
             }
         }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(Color.black.opacity(0.42))   // darker glass
+            }
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Color.white.opacity(0.14), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.5), radius: 24, x: 0, y: 12)
+        // fades out while the panel is being dragged, back in once it lands
+        .shadow(color: .black.opacity(panelShadowOn ? 0.5 : 0), radius: 24, x: 0, y: 12)
         .environment(\.colorScheme, .dark)
     }
 
@@ -165,7 +250,7 @@ struct RootView: View {
             HStack(spacing: 10) {
                 Image(systemName: "square.grid.3x3.fill")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.pink)
+                    .foregroundStyle(Dial.accent)
                 Text("PinWall")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
@@ -193,6 +278,25 @@ struct RootView: View {
                       : "Last refreshed \(h / 24)d ago"
     }
 
+    // MARK: - traffic dots (window controls inside the panel)
+
+    private var trafficDots: some View {
+        HStack(spacing: 8) {
+            trafficDot(Color(red: 1.0, green: 0.37, blue: 0.34)) { NSApp.keyWindow?.close() }
+            trafficDot(Color(red: 1.0, green: 0.74, blue: 0.18)) { NSApp.keyWindow?.miniaturize(nil) }
+            trafficDot(Color(red: 0.16, green: 0.78, blue: 0.25)) { NSApp.keyWindow?.zoom(nil) }
+            Spacer()
+        }
+    }
+    private func trafficDot(_ color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle().fill(color)
+                .frame(width: 12, height: 12)
+                .overlay(Circle().stroke(Color.black.opacity(0.2), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - DialKit titlebar + connection folder
 
     private var dialTitlebar: some View {
@@ -206,28 +310,28 @@ struct RootView: View {
         }
     }
 
-    private var connectionFolder: some View {
-        DialFolder(providerTab == "icloud" ? "ICLOUD" : "PINTEREST",
-                   meta: providerTab == "icloud"
-                       ? (settings.icloudURL.isEmpty ? "not linked" : "linked")
-                       : (settings.connected ? "connected" : "not connected")) {
+    // Flat source strip (no folder chrome) — the most-touched control.
+    private var sourceSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
             if providerTab == "icloud" { icloudConnBody } else { pinterestConnBody }
         }
-        .id(providerTab)   // rebuild (and un-collapse) when the tab flips
+        .id(providerTab)   // rebuild when the tab flips
+    }
+
+    // Small square icon button in the DialKit chip style.
+    private func connIcon(_ system: String, _ help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Dial.textMuted)
+                .frame(width: 26, height: 26)
+                .background(Dial.surface, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Dial.stroke, lineWidth: 1))
+        }
+        .buttonStyle(.plain).help(help)
     }
 
     @ViewBuilder private var pinterestConnBody: some View {
-        HStack(spacing: 8) {
-            Circle().fill(settings.connected ? Dial.good : Color.orange)
-                .frame(width: 8, height: 8)
-                .shadow(color: settings.connected ? Dial.good.opacity(0.6) : .clear, radius: 4)
-            Text(settings.connected ? "Connected" : "Not connected")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Dial.textRoot)
-            Spacer()
-            if refreshing { ProgressView().controlSize(.small) }
-        }
-        .padding(.vertical, 3)
-
         if settings.connected && PinWall.harvestLoggedOut {
             Button { connect() } label: {
                 Label("Sign-in expired — reconnect", systemImage: "exclamationmark.triangle.fill")
@@ -236,25 +340,21 @@ struct RootView: View {
         }
 
         if settings.connected {
+            // One tidy row: Source dropdown + compact add/refresh chips.
             DialRow(label: "Source") {
-                Picker("", selection: sourceBinding) {
-                    Text("Feed").tag(FeedSource.feed)
-                    if !boards.isEmpty {
-                        Divider()
-                        ForEach(boards, id: \.url) { b in Text(b.name).tag(b.url) }
+                HStack(spacing: 6) {
+                    Picker("", selection: sourceBinding) {
+                        Text("Feed").tag(FeedSource.feed)
+                        if !boards.isEmpty {
+                            Divider()
+                            ForEach(boards, id: \.url) { b in Text(b.name).tag(b.url) }
+                        }
+                    }
+                    .labelsHidden().pickerStyle(.menu).tint(.white)
+                    connIcon("plus", "Add a board by URL") {
+                        withAnimation(.easeInOut(duration: 0.2)) { showAddBoard.toggle() }
                     }
                 }
-                .labelsHidden().pickerStyle(.menu).tint(.white).fixedSize()
-            }
-            HStack(spacing: 12) {
-                Text(boards.isEmpty ? "No boards found" : "\(boards.count) boards")
-                    .font(.system(size: 11)).foregroundStyle(Dial.textSection)
-                Spacer()
-                Button("Add URL") { showAddBoard.toggle() }
-                    .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Dial.accent)
-                Button("Refresh") { refreshBoards() }
-                    .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Dial.accent)
-                    .disabled(refreshing)
             }
             if showAddBoard {
                 HStack(spacing: 7) {
@@ -262,31 +362,22 @@ struct RootView: View {
                         .textFieldStyle(DialFieldStyle())
                         .onSubmit { addBoard() }
                     Button("Add") { addBoard() }
-                        .buttonStyle(DialButtonStyle()).fixedSize()
+                        .buttonStyle(DialButtonStyle(compact: true))
                 }
-                .padding(.top, 2)
             }
             if let s = sourceStatus {
                 Text(s).font(.system(size: 11)).foregroundStyle(Dial.textSection)
             }
         } else {
-            Button { connect() } label: { Text("Connect your Pinterest") }
+            Text("Connect your Pinterest to fill the wall with your own feed.")
+                .font(.system(size: 12)).foregroundStyle(Dial.textSection)
+                .fixedSize(horizontal: false, vertical: true)
+            Button { connect() } label: { Text("Connect Pinterest") }
                 .buttonStyle(DialButtonStyle(accent: true))
         }
     }
 
     @ViewBuilder private var icloudConnBody: some View {
-        HStack(spacing: 8) {
-            Circle().fill(settings.icloudURL.isEmpty ? Dial.textSection : Dial.good)
-                .frame(width: 8, height: 8)
-                .shadow(color: settings.icloudURL.isEmpty ? .clear : Dial.good.opacity(0.6), radius: 4)
-            Text(settings.icloudURL.isEmpty ? "Not linked" : "Linked")
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Dial.textRoot)
-            Spacer()
-            if icloudLoading { ProgressView().controlSize(.small) }
-        }
-        .padding(.vertical, 3)
-
         if settings.icloudURL.isEmpty {
             Text("Paste a public iCloud Shared Album link. In Photos: album → People → turn on Public Website → Copy Link.")
                 .font(.system(size: 11)).foregroundStyle(Dial.textSection)
@@ -296,28 +387,32 @@ struct RootView: View {
                     .textFieldStyle(DialFieldStyle())
                     .onSubmit { linkICloud() }
                 Button("Load") { linkICloud() }
-                    .buttonStyle(DialButtonStyle(accent: true)).fixedSize()
+                    .buttonStyle(DialButtonStyle(accent: true, compact: true))
                     .disabled(icloudLoading)
             }
-            .padding(.top, 2)
         } else {
-            Text(settings.icloudURL)
-                .font(.system(size: 11, design: .monospaced)).foregroundStyle(Dial.textSection)
-                .lineLimit(1).truncationMode(.middle)
-            Button { refreshICloud() } label: { Text("Refresh album now") }
-                .buttonStyle(DialButtonStyle())
-                .disabled(icloudLoading)
-            Button {
-                // Unlink: clear the link + cached photos, then play the wall OUT
-                // (tiles scroll off, red skeleton takes over) instead of cutting.
-                settings.icloudURL = ""; settings.save(); icloudStatus = nil
-                PinStore.clearCache(for: "icloud")
-                if settings.provider == "icloud" {
-                    PinStore.save([])          // saver mirror → skeleton too
-                    drainToken += 1            // in-app: graceful play-out
+            // One compact row: album identity + refresh / unlink chips.
+            DialRow(label: "Album") {
+                HStack(spacing: 6) {
+                    Text(settings.icloudURL)
+                        .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Dial.textSection)
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: 120, alignment: .trailing)
+                    connIcon("arrow.clockwise", "Refresh album now") { refreshICloud() }
+                        .disabled(icloudLoading)
+                    connIcon("xmark", "Unlink album") {
+                        // Unlink: clear the link + cached photos, then play the wall
+                        // OUT (tiles scroll off, red skeleton) instead of cutting.
+                        settings.icloudURL = ""; settings.save(); icloudStatus = nil
+                        PinStore.clearCache(for: "icloud")
+                        if settings.provider == "icloud" {
+                            PinStore.save([])          // saver mirror → skeleton too
+                            drainToken += 1            // in-app: graceful play-out
+                        }
+                    }
+                    if icloudLoading { ProgressView().controlSize(.small) }
                 }
-            } label: { Text("Unlink album") }
-                .buttonStyle(DialButtonStyle(ghost: true))
+            }
         }
         if let s = icloudStatus {
             Text(s).font(.system(size: 11)).foregroundStyle(Dial.textSection)
@@ -391,9 +486,9 @@ struct RootView: View {
                         .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
                     Spacer()
                     Button("Add URL") { showAddBoard.toggle() }
-                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(.pink)
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Dial.accent)
                     Button("Refresh") { refreshBoards() }
-                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(.pink)
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Dial.accent)
                         .disabled(refreshing)
                 }
                 if showAddBoard {
@@ -414,7 +509,7 @@ struct RootView: View {
                 } label: {
                     Text("Connect your Pinterest").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(GlassButtonStyle(tint: .pink))
+                .buttonStyle(GlassButtonStyle(tint: Dial.accent))
             }
         }
     }
@@ -448,8 +543,22 @@ struct RootView: View {
         sourceStatus = "Loading pins…"
         AppHarvest.run(source: settings.source) { count in
             refreshing = false
-            sourceStatus = count > 0 ? "Showing \(count) pins" : "Couldn’t load that source"
-            reloadToken += 1
+            if count == -1 {
+                flashStatus("Another refresh is already running — try again in a moment")
+            } else if count > 0 {
+                flashStatus("Showing \(count) pins")
+                reloadToken += 1
+            } else {
+                flashStatus("Couldn’t load that source")
+            }
+        }
+    }
+
+    /// Show a status line, then clear it after a few seconds (unless replaced).
+    private func flashStatus(_ text: String) {
+        sourceStatus = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            if sourceStatus == text { sourceStatus = nil }
         }
     }
 
@@ -459,7 +568,7 @@ struct RootView: View {
         AppHarvest.refreshBoards { found in
             refreshing = false
             boards = found
-            sourceStatus = found.isEmpty ? "No boards found — add one by URL instead" : "Found \(found.count) boards"
+            flashStatus(found.isEmpty ? "No boards found — add one by URL instead" : "Found \(found.count) boards")
         }
     }
 
@@ -527,31 +636,18 @@ struct RootView: View {
         return final.absoluteString
     }
 
-    // The always-on scrolling wall: how fast it drifts and how many columns.
-    private var wallSection: some View {
-        DialFolder("WALL", icon: "square.grid.2x2") {
-            DialSlider(label: "Scroll speed", value: $settings.speed, range: 10...120,
-                       step: 10, onCommit: { settings.save() })
+    // HOT ZONE — the dials people actually play with, flat on the panel.
+    private var dialsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Shown 0–100 (step 1); mapped to the real 5–60 px/s scroll speed.
+            DialSlider(label: "Scroll speed", value: speedDisplayBinding, range: 0...100,
+                       step: 1, onCommit: { settings.save() })
             DialSlider(label: "Columns", value: $settings.columns, range: 3...10,
                        step: 1, onCommit: { settings.save() })
             // Centred at 0 = straight; ±30° tilts the scrolling axis left/right.
             DialSlider(label: "Tilt", value: $settings.feedAngle, range: -30...30,
                        step: 1, unit: "°", onCommit: { settings.save() })
-        }
-    }
-
-    private var introStyleName: String {
-        switch settings.introStyle {
-        case "radial": return "radial"
-        case "radialDots": return "radial dots"
-        default: return "bloom"
-        }
-    }
-
-    // The entrance animation, played once when the screensaver starts.
-    private var introSection: some View {
-        DialFolder("INTRO", icon: "sparkles", meta: introStyleName) {
-            pickerRow("Style", selection: introStyleBinding) {
+            pickerRow("Intro", selection: introStyleBinding) {
                 Text("Bloom").tag("bloom")
                 Text("Radial").tag("radial")
                 Text("Radial dots").tag("radialDots")
@@ -568,10 +664,37 @@ struct RootView: View {
             Button {
                 PreviewController.shared.show()
             } label: {
-                Label("Preview intro", systemImage: "play.fill").frame(maxWidth: .infinity)
+                Label("Preview", systemImage: "play.fill").frame(maxWidth: .infinity)
             }
             .buttonStyle(DialButtonStyle(accent: true))
+            .padding(.top, 6)
             .help("Full-screen preview of the wall — press Esc to exit. Doesn’t lock your screen.")
+        }
+    }
+
+    // Quick rows: the two hot non-dial controls.
+    private var quickRows: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            toggleRow("Clock overlay", "Styling lives under Advanced", isOn: $settings.clock)
+            HStack {
+                Text(lastRefreshedText)
+                    .font(.system(size: 11)).foregroundStyle(Dial.textSection)
+                Spacer()
+                Button {
+                    if providerTab == "icloud" { refreshICloud() } else { refreshSource() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 10, weight: .semibold))
+                        Text(refreshing || icloudLoading ? "Refreshing…" : "Refresh now")
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Dial.accent)
+                }
+                .buttonStyle(.plain)
+                .disabled(refreshing || icloudLoading ||
+                          (providerTab == "icloud" ? settings.icloudURL.isEmpty : !settings.connected))
+            }
+            .frame(minHeight: 26)
         }
     }
 
@@ -583,6 +706,14 @@ struct RootView: View {
     private var clockPosBinding: Binding<String> {
         Binding(get: { settings.clockPos },
                 set: { settings.clockPos = $0; settings.save() })
+    }
+    // Scroll speed shown as 0–100, stored as 5–60 px/s.
+    private static let speedMin = 5.0, speedMax = 60.0
+    private var speedDisplayBinding: Binding<Double> {
+        Binding(
+            get: { ((settings.speed - Self.speedMin) / (Self.speedMax - Self.speedMin) * 100).rounded() },
+            set: { settings.speed = Self.speedMin + max(0, min(100, $0)) / 100 * (Self.speedMax - Self.speedMin) }
+        )
     }
     private var introStyleBinding: Binding<String> {
         Binding(get: { settings.introStyle },
@@ -601,31 +732,35 @@ struct RootView: View {
                 set: { settings.clockColor = $0.hexString; settings.save() })
     }
 
-    private var effectsSection: some View {
-        DialFolder("CLOCK", icon: "clock", meta: settings.clock ? "on" : "off",
-                   startCollapsed: !settings.clock) {
-            toggleRow("Clock & date overlay", "Show the time over the wall", isOn: $settings.clock)
-            if settings.clock {
-                pickerRow("Position", selection: clockPosBinding) {
-                    ForEach(clockPositions, id: \.0) { Text($0.1).tag($0.0) }
-                }
-                DialSlider(label: "Size", value: $settings.clockSize, range: 60...160,
-                           step: 10, unit: "%", onCommit: { settings.save() })
-                pickerRow("Font", selection: fontBinding) {
-                    Text("System").tag("system")
-                    Text("Rounded").tag("rounded")
-                    Text("Serif").tag("serif")
-                    Text("Mono").tag("mono")
-                }
-                DialSlider(label: "Weight", value: $settings.clockWeight, range: 100...900,
-                           step: 100, onCommit: { settings.save() })
-                DialRow(label: "Colour") {
-                    ColorPicker("", selection: clockColorBinding, supportsOpacity: false).labelsHidden()
-                }
-                toggleRow("Glass font", "Frosted background behind the clock", isOn: $settings.clockGlass)
-                toggleRow("Show date", "", isOn: $settings.clockDate)
-            }
+    // ---- ADVANCED drawer: everything set-once / boring, grouped by tiny labels.
+
+    private func advLabel(_ t: String) -> some View {
+        Text(t)
+            .font(.system(size: 9.5, weight: .bold)).tracking(1.3)
+            .foregroundStyle(Dial.textSection)
+            .padding(.top, 6)
+    }
+
+    @ViewBuilder private var advClockBlock: some View {
+        advLabel("CLOCK STYLE")
+        pickerRow("Position", selection: clockPosBinding) {
+            ForEach(clockPositions, id: \.0) { Text($0.1).tag($0.0) }
         }
+        DialSlider(label: "Size", value: $settings.clockSize, range: 60...160,
+                   step: 10, unit: "%", onCommit: { settings.save() })
+        pickerRow("Font", selection: fontBinding) {
+            Text("System").tag("system")
+            Text("Rounded").tag("rounded")
+            Text("Serif").tag("serif")
+            Text("Mono").tag("mono")
+        }
+        DialSlider(label: "Weight", value: $settings.clockWeight, range: 100...900,
+                   step: 100, onCommit: { settings.save() })
+        DialRow(label: "Colour") {
+            ColorPicker("", selection: clockColorBinding, supportsOpacity: false).labelsHidden()
+        }
+        toggleRow("Glass font", "Frosted background behind the clock", isOn: $settings.clockGlass)
+        toggleRow("Show date", "", isOn: $settings.clockDate)
     }
 
     // A labelled menu-picker row (label left, dropdown flush right).
@@ -650,31 +785,24 @@ struct RootView: View {
         return "\(m)m"
     }
 
-    private var behaviourSection: some View {
-        DialFolder("FEED REFRESH", icon: "arrow.clockwise", meta: refreshMeta) {
-            pickerRow("Refresh every", selection: refreshBinding) {
-                Text("30 min").tag(30.0)
-                Text("1 hour").tag(60.0)
-                Text("3 hours").tag(180.0)
-                Text("6 hours").tag(360.0)
-                Text("Once a day").tag(1440.0)
-            }
-            DialSlider(label: "Pins per refresh", value: $settings.pinTarget, range: 100...300,
-                       step: 20, onCommit: { settings.save() })
-            toggleRow("Only on charger", "Skip refreshing your feed while on battery",
-                      isOn: $settings.chargerOnly)
-            Button {
-                refreshSource()
-            } label: {
-                Label(refreshing ? "Refreshing…" : "Refresh feed now",
-                      systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(DialButtonStyle())
-            .disabled(refreshing || !(settings.connected || !settings.icloudURL.isEmpty))
-            Text(lastRefreshedText)
-                .font(.system(size: 11)).foregroundStyle(Dial.textSection)
+    @ViewBuilder private var advRefreshBlock: some View {
+        advLabel("REFRESH")
+        pickerRow("Refresh every", selection: refreshBinding) {
+            Text("30 min").tag(30.0)
+            Text("1 hour").tag(60.0)
+            Text("3 hours").tag(180.0)
+            Text("6 hours").tag(360.0)
+            Text("Once a day").tag(1440.0)
         }
+        DialSlider(label: "Pins per refresh", value: $settings.pinTarget, range: 100...300,
+                   step: 20, onCommit: { settings.save() })
+        toggleRow("Only on charger", "Skip refreshing your feed while on battery",
+                  isOn: $settings.chargerOnly)
+        Button { refreshBoards() } label: {
+            Text(refreshing ? "Finding boards…" : "Find my boards").frame(maxWidth: .infinity)
+        }
+        .buttonStyle(DialButtonStyle(ghost: true))
+        .disabled(refreshing || !settings.connected)
     }
 
     // A settings row with a DialKit Off/On segmented toggle flush right.
@@ -684,54 +812,64 @@ struct RootView: View {
         }
     }
 
-    private var installSection: some View {
-        DialFolder("SCREEN SAVER", icon: "display", startCollapsed: true) {
-            Button {
-                installStatus = Installer.installSaver()
-            } label: {
-                Label("Set up PinWall screensaver", systemImage: "menubar.dock.rectangle")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(DialButtonStyle())
-            if let s = installStatus {
-                Text(s).font(.system(size: 11)).foregroundStyle(Dial.textSection)
-            }
+    private func runSaverSetup() {
+        installStatus = Installer.installSaver()
+        saverSetupDone = true
+        UserDefaults(suiteName: PinWall.suiteName)?.set(true, forKey: "saverSetupDone")
+    }
+
+    @ViewBuilder private var advSaverBlock: some View {
+        advLabel("SCREEN SAVER")
+        Button { runSaverSetup() } label: {
+            Label("Set up PinWall screensaver", systemImage: "menubar.dock.rectangle")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(DialButtonStyle())
+        if let s = installStatus {
+            Text(s).font(.system(size: 11)).foregroundStyle(Dial.textSection)
         }
     }
 
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider().overlay(Dial.stroke)
-
-            HStack(spacing: 8) {
-                Button {
-                    settings.resetTuning()
-                    settings.save()
-                    reloadToken += 1
-                } label: { Text("Reset") }
-                    .buttonStyle(DialButtonStyle(ghost: true))
-                if settings.connected {
-                    Button { logout() } label: { Text("Log out") }
-                        .buttonStyle(DialButtonStyle(ghost: true))
-                }
-            }
-            .padding(.top, 8)
-
-            Button { confirmUninstall() } label: { Text("Uninstall PinWall…") }
+    @ViewBuilder private var advMaintenanceBlock: some View {
+        advLabel("MAINTENANCE")
+        HStack(spacing: 8) {
+            Button {
+                settings.resetTuning()
+                settings.save()
+                reloadToken += 1
+            } label: { Text("Reset") }
                 .buttonStyle(DialButtonStyle(ghost: true))
-
-            HStack {
-                Text("v\(appVersion)")
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(Dial.textSection)
-                Spacer()
-                Button(updater.statusText) { updater.checkNow() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Dial.textMuted)
+            if settings.connected {
+                Button { logout() } label: { Text("Log out") }
+                    .buttonStyle(DialButtonStyle(ghost: true))
             }
-            .padding(.top, 4)
         }
+        Button { confirmUninstall() } label: { Text("Uninstall PinWall…") }
+            .buttonStyle(DialButtonStyle(ghost: true))
+    }
+
+    // One drawer for every set-once control.
+    private var advancedFolder: some View {
+        DialFolder("ADVANCED", icon: "slider.horizontal.3", startCollapsed: true) {
+            advRefreshBlock
+            if settings.clock { advClockBlock }
+            advSaverBlock
+            advMaintenanceBlock
+        }
+    }
+
+    private var slimFooter: some View {
+        HStack {
+            Text("v\(appVersion)")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Dial.textSection)
+            Spacer()
+            Button(updater.statusText) { updater.checkNow() }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Dial.textMuted)
+        }
+        .padding(.top, 8)
     }
 
     private func confirmUninstall() {
@@ -759,25 +897,11 @@ struct RootView: View {
 
     // MARK: - Top drag bar
 
+    // Invisible strip along the top: still drags the window, draws nothing —
+    // the wall runs edge-to-edge (window controls live in the panel).
     private var dragBar: some View {
-        ZStack {
-            WindowDragArea()
-            HStack(spacing: 7) {
-                Image(systemName: "square.grid.3x3.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.pink)
-                Text("PinWall")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
-            .allowsHitTesting(false)   // let drags fall through to the drag area
-        }
-        .frame(height: 38)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Rectangle().frame(height: 1).foregroundStyle(.white.opacity(0.08))
-        }
-        .environment(\.colorScheme, .dark)
+        WindowDragArea()
+            .frame(height: 30)
     }
 
     // MARK: - Floating buttons (bottom-right)
@@ -825,7 +949,7 @@ struct RootView: View {
             Slider(value: snapped, in: range) { editing in
                 if !editing { settings.save() }
             }
-            .tint(.pink)
+            .tint(Dial.accent)
         }
     }
 
@@ -847,6 +971,47 @@ struct RootView: View {
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
     }
+}
+
+/// Hides the system title bar + traffic lights so the wall fills the window
+/// edge-to-edge; the panel draws its own traffic dots (Apple TV style).
+/// Also enforces the window's minimum size CONTINUOUSLY — with the titlebar
+/// hidden, SwiftUI stops enforcing it, which is what previously let the window
+/// shrink under the layout and pushed the panel off the edges.
+struct WindowConfigurator: NSViewRepresentable {
+    final class ConfigView: NSView {
+        private var observers: [NSObjectProtocol] = []
+        override func viewDidMoveToWindow() {
+            guard let w = window else { return }
+            apply(w)
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = [
+                NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                                                       object: w, queue: .main) { [weak self] _ in self?.enforce() },
+                NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification,
+                                                       object: w, queue: .main) { [weak self] _ in self?.enforce() },
+            ]
+            DispatchQueue.main.async { [weak self] in self?.enforce() }
+        }
+        private func apply(_ w: NSWindow) {
+            w.styleMask.insert(.fullSizeContentView)
+            w.titlebarAppearsTransparent = true
+            w.titleVisibility = .hidden
+            w.standardWindowButton(.closeButton)?.isHidden = true
+            w.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            w.standardWindowButton(.zoomButton)?.isHidden = true
+        }
+        private func enforce() {
+            guard let w = window else { return }
+            apply(w)   // SwiftUI can re-show buttons on focus changes — reassert
+            // Layout adapts to ANY size now; this is just a usability floor
+            // (panel 320 + margins + some wall).
+            w.contentMinSize = NSSize(width: 560, height: 480)
+        }
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    }
+    func makeNSView(context: Context) -> NSView { ConfigView() }
+    func updateNSView(_ view: NSView, context: Context) {}
 }
 
 /// Transparent AppKit view that turns any mouse-down into a window drag —

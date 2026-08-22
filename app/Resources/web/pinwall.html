@@ -50,6 +50,25 @@
   #skelwrap::after { content: ""; position: absolute; inset: 0; pointer-events: none;
     background: radial-gradient(135% 95% at 32% 38%, rgba(10,7,8,.12), rgba(10,7,8,.68) 88%); }
 
+  /* ---- bottom-left stats ticker (Pins served / Runtime) ---- */
+  #stats { position: fixed; left: 26px; bottom: 22px; z-index: 80; display: none;
+    color: #fff; pointer-events: none;
+    /* drop-shadow applies AFTER the digit windows clip — text-shadow on the
+       stacked 0-9 strips bled a boxy blob into the visible digit */
+    filter: drop-shadow(0 1px 6px rgba(0,0,0,.6));
+    font-family: -apple-system, system-ui, sans-serif; }
+  body.stats #stats { display: block; }
+  body.gallery #stats, body.skeleton #stats { display: none; }
+  #stats .slabel { font-size: 10.5px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; opacity: .55; margin-bottom: 2px; }
+  #stats .odo { display: flex; height: 30px; font-size: 26px; font-weight: 700;
+    font-variant-numeric: tabular-nums; }
+  #stats .odo .dg { position: relative; width: .62em; height: 30px; overflow: hidden; }
+  #stats .odo .dg .strip { position: absolute; left: 0; top: 0; width: 100%;
+    transition: transform .55s cubic-bezier(.3,.9,.3,1); }
+  #stats .odo .dg .strip span { display: block; height: 30px; line-height: 30px; text-align: center; }
+  #stats .odo .sep { line-height: 30px; opacity: .7; }
+
   #tuner { position: fixed; top: 16px; left: 16px; z-index: 9999; display: none; width: 240px;
     background: rgba(20,20,22,.92); color: #e8e8ea; backdrop-filter: blur(10px);
     font: 12px/1.4 -apple-system, system-ui, sans-serif; padding: 14px 16px;
@@ -101,6 +120,7 @@
 <div id="viewport"></div>
 <div id="skelwrap"><div id="skeleton"></div></div>
 <div id="ghint">Gallery — scroll or drag to move, click a pin to open it on Pinterest</div>
+<div id="stats"><div class="slabel"></div><div class="odo"></div></div>
 
 <div id="tuner">
   <h4>PinWall tuner</h4>
@@ -612,7 +632,7 @@ function boot(PINS) {
 
   const FPS_CAP = 30, FRAME_MS = 1000 / FPS_CAP - 4;
   const MIN_MOVE_PX = 0.05;
-  let rafId = null, running = false, lastFrame = 0;
+  let rafId = null, running = false, lastFrame = 0, moveTs = null;
 
   function setPromoted(on) {
     columns.forEach(c => { c.el.style.willChange = on ? 'transform' : ''; });
@@ -632,9 +652,12 @@ function boot(PINS) {
     const nowS = Date.now() / 1000;
     if (!drainT0) {
       drainT0 = nowS;
-      const t = gallery ? vt : nowS;
       columns.forEach(c => { if (!c.loopHeight) return;
-        c.drainOff = ((t * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight; });
+        // start the play-out from the wall's CURRENT position (c.pos for the live
+        // wall; vt-derived in gallery) so there's no jump into the drain.
+        c.drainOff = (!gallery && c.pos != null)
+          ? c.pos
+          : ((vt * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight; });
     }
     const dSpeed = Math.max(speed, 80);          // never drain in slow motion
     let allGone = true;
@@ -655,18 +678,122 @@ function boot(PINS) {
     if (draining) { drainFrame(); return; }   // play-out overrides the loop
     maybeStartIntro(now);                     // armed intro fires once the wall is loaded
     if (gallery) {
+      // gallery: virtual time you can drag/nudge; offset derived from vt.
       if (lastTs == null || now < lastTs) lastTs = now;
       if (autoScroll && !paused) vt += (now - lastTs) / 1000;
       lastTs = now;
+      columns.forEach((c) => { if (!c.loopHeight) return;
+        const off = ((vt * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight;
+        if (c.lastOff != null && Math.abs(off - c.lastOff) < MIN_MOVE_PX) return;
+        c.lastOff = off;
+        c.el.style.transform = `translateY(${-off}px)`; });
+      return;
     }
-    const t = gallery ? vt : (Date.now() / 1000);
+    // Live wall: ACCUMULATE the offset by dt*speed. Deriving it from the wall
+    // clock (Date.now()*speed) made a speed change rescale a huge number and
+    // teleport the feed; accumulating means a new speed only changes the rate
+    // from here on — the wall keeps its position. Each column seeds its start
+    // position from the clock once, so the screensaver still resumes across
+    // launches roughly where it left off.
+    if (moveTs == null || now < moveTs) moveTs = now;
+    let dt = (now - moveTs) / 1000;
+    if (!(dt >= 0 && dt < 1)) dt = 0;   // clock switch / long pause → don't lurch
+    moveTs = now;
+    statsAccrue(dt);                    // lifetime pins/runtime ticker
     columns.forEach((c) => { if (!c.loopHeight) return;
-      const off = ((t * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight;
-      // skip the write when the wall hasn't visibly moved (speed 0, paused hover)
-      if (c.lastOff != null && Math.abs(off - c.lastOff) < MIN_MOVE_PX) return;
-      c.lastOff = off;
-      c.el.style.transform = `translateY(${-off}px)`; });
+      if (c.pos == null) c.pos = ((Date.now() / 1000 * speed + c.phase) % c.loopHeight + c.loopHeight) % c.loopHeight;
+      c.pos = (c.pos + dt * speed) % c.loopHeight;
+      // skip the write when the wall hasn't visibly moved (speed 0, paused)
+      if (c.lastOff != null && Math.abs(c.pos - c.lastOff) < MIN_MOVE_PX) return;
+      c.lastOff = c.pos;
+      c.el.style.transform = `translateY(${-c.pos}px)`; });
   }
+  // ---- lifetime stats ticker (bottom-left): Pins served ⇄ Runtime (mins) ----
+  // Counts pins as scroll distance × tile density, accrues runtime, renders a
+  // slot-machine odometer, alternates metric every 5s, and posts deltas to the
+  // native host for persistence.
+  const statsEl = document.getElementById('stats');
+  // App-only: the ticker never shows on the actual screensaver (NATIVE.app is
+  // false in the saver mirror) — stats still accrue there via the host bridge.
+  const statsOn = !!NATIVE && !!NATIVE.app && !gallery && !!statsEl;
+  let statPins = (NATIVE && +NATIVE.statPins) || 0;
+  let statSecs = (NATIVE && +NATIVE.statSecs) || 0;
+  let pendPins = 0, pendSecs = 0, lastPostSecs = 0;
+  let statMode = 0, modeClock = 0, uiClock = 0, lastShown = -1;
+  if (statsOn) document.body.classList.add('stats');
+  function statsAccrue(dt) {
+    if (!statsOn || !dt) return;
+    statSecs += dt; pendSecs += dt; modeClock += dt; uiClock += dt;
+    let pps = 0;   // pins/second across all columns at the current speed
+    columns.forEach(c => { if (!c.loopHeight) return;
+      pps += speed * ((c.el.children.length / 2) / c.loopHeight); });
+    statPins += pps * dt; pendPins += pps * dt;
+    if (modeClock >= 10) { modeClock = 0; statMode = 1 - statMode; lastShown = -1; renderStats(); }
+    else if (uiClock >= 0.5) { uiClock = 0; renderStats(); }
+    if (statSecs - lastPostSecs >= 5) {
+      lastPostSecs = statSecs;
+      try {
+        window.webkit.messageHandlers.pinwall.postMessage({ type: 'stats', pins: pendPins, secs: pendSecs });
+        pendPins = 0; pendSecs = 0;
+      } catch (e) {}
+    }
+  }
+  function renderStats() {
+    const val = statMode === 0 ? Math.floor(statPins) : Math.floor(statSecs / 60);
+    if (val === lastShown) return;
+    lastShown = val;
+    setStatLabel(statMode === 0 ? 'Pins served' : 'Runtime (mins)');
+    odoSet(statsEl.querySelector('.odo'), val);
+  }
+  // label swap slides/fades so the metric change reads as one slot motion
+  function setStatLabel(txt) {
+    const el = statsEl.querySelector('.slabel');
+    if (el.textContent === txt) return;
+    if (!el.textContent) { el.textContent = txt; return; }   // first paint
+    el.style.transition = 'opacity .16s ease, transform .16s ease';
+    el.style.opacity = '0'; el.style.transform = 'translateY(8px)';
+    setTimeout(() => {
+      el.textContent = txt;
+      el.style.transition = 'none'; el.style.transform = 'translateY(-8px)';
+      requestAnimationFrame(() => {
+        el.style.transition = 'opacity .2s ease, transform .2s ease';
+        el.style.opacity = '1'; el.style.transform = 'translateY(0)';
+      });
+    }, 170);
+  }
+  // slot-machine digits: each digit is a 0–9 strip translated to its value
+  function odoSet(odo, n) {
+    const str = Math.max(0, n).toLocaleString('en-US');
+    const shape = str.replace(/\d/g, 'd');
+    if (odo.dataset.shape !== shape) {       // rebuild only when layout changes
+      odo.dataset.shape = shape;
+      odo.innerHTML = '';
+      for (const ch of str) {
+        if (ch >= '0' && ch <= '9') {
+          const dg = document.createElement('div'); dg.className = 'dg';
+          const strip = document.createElement('div'); strip.className = 'strip';
+          for (let i = 0; i <= 9; i++) { const s = document.createElement('span'); s.textContent = i; strip.appendChild(s); }
+          dg.appendChild(strip); odo.appendChild(dg);
+        } else {
+          const sep = document.createElement('div'); sep.className = 'sep'; sep.textContent = ch;
+          odo.appendChild(sep);
+        }
+      }
+      // fresh strips start at 0 with no transition, then ROLL to their target —
+      // so a metric swap (new digit layout) still plays the slot animation
+      const fresh = odo.querySelectorAll('.dg .strip');
+      fresh.forEach(st => { st.style.transition = 'none'; st.style.transform = 'translateY(0)'; });
+      void odo.offsetWidth;
+      fresh.forEach(st => { st.style.transition = ''; });
+    }
+    const strips = odo.querySelectorAll('.dg .strip');
+    let di = 0;
+    for (const ch of str) {
+      if (ch >= '0' && ch <= '9') { strips[di].style.transform = 'translateY(' + (-(+ch) * 30) + 'px)'; di++; }
+    }
+  }
+  if (statsOn) renderStats();
+
   function tick(now) {
     rafId = requestAnimationFrame(tick);
     window.__beats = (window.__beats || 0) + 1;   // rAF liveness heartbeat for the native host

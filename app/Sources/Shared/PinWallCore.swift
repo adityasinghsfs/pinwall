@@ -209,6 +209,24 @@ public enum PinStore {
         save(pins)
         return pins.count
     }
+}
+
+/// Lifetime wall statistics (pins scrolled past + runtime), shared by the app
+/// and the screensaver through the UserDefaults suite. The wall page counts in
+/// JS and posts small deltas; hosts accumulate them here.
+public enum WallStats {
+    private static var d: UserDefaults { UserDefaults(suiteName: PinWall.suiteName) ?? .standard }
+    public static var pinsServed: Double { d.double(forKey: "statPinsServed") }
+    public static var runtimeSecs: Double { d.double(forKey: "statRuntimeSecs") }
+    public static func add(pins: Double, secs: Double) {
+        // deltas arrive every few seconds; clamp so a glitch can't explode the counters
+        let p = max(0, min(pins, 10_000)), s = max(0, min(secs, 600))
+        d.set(pinsServed + p, forKey: "statPinsServed")
+        d.set(runtimeSecs + s, forKey: "statRuntimeSecs")
+    }
+}
+
+extension PinStore {
     /// JSON array literal for injecting into the page as `window.PINS`.
     public static func pinsJSON(_ pins: [Pin]) -> String {
         guard let data = try? JSONEncoder().encode(pins),
@@ -393,6 +411,7 @@ public struct WallSettings: Equatable {
             "clockFont": clockFont, "clockWeight": clockWeight,
             "clockGlass": clockGlass, "clockColor": clockColor,
             "introStyle": introStyle, "introOrigin": introOrigin, "feedAngle": feedAngle,
+            "statPins": WallStats.pinsServed, "statSecs": WallStats.runtimeSecs,
             "gallery": gallery, "skeleton": skeleton, "app": app,
             "hideWall": hideWall, "reload": reload,
         ]

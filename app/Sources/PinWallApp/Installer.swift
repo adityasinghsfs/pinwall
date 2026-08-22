@@ -45,7 +45,8 @@ enum Installer {
             try fm.copyItem(at: src, to: dest)
             stripQuarantine(dest)
             if openSettings { openScreenSaverSettings() }
-            return "Installed. Choose “PinWall” in System Settings → Screen Saver."
+            return "Installed. Choose “PinWall” in System Settings → Screen Saver. "
+                 + "If it doesn’t show up, give it a couple of minutes."
         } catch {
             return "Install failed: \(error.localizedDescription)"
         }

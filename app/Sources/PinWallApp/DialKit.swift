@@ -17,9 +17,9 @@ enum Dial {
     static let textLabel      = Color.white.opacity(0.84)
     static let textSection    = Color.white.opacity(0.42)
     static let textMuted      = Color.white.opacity(0.50)
-    // accent
-    static let accent         = Color(red: 1.0, green: 0.216, blue: 0.373)          // #FF375F
-    static let accentDeep     = Color(red: 0.878, green: 0.118, blue: 0.251)        // #E01E40
+    // accent — Pinterest's official red
+    static let accent         = Color(red: 0.902, green: 0.0, blue: 0.137)          // #E60023
+    static let accentDeep     = Color(red: 0.718, green: 0.0, blue: 0.110)          // #B7001C
     static let good           = Color(red: 0.204, green: 0.78, blue: 0.349)         // #34C759
     // metrics
     static let radius: CGFloat = 16
@@ -182,8 +182,10 @@ struct DialRow<Trailing: View>: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(label).font(.system(size: 12.5)).foregroundStyle(Dial.textLabel)
+                    .lineLimit(1).fixedSize()   // never wrap the label vertically
                 if !sub.isEmpty {
                     Text(sub).font(.system(size: 10.5)).foregroundStyle(Dial.textSection)
+                        .lineLimit(1)
                 }
             }
             Spacer(minLength: 8)
@@ -198,22 +200,25 @@ struct DialRow<Trailing: View>: View {
 struct DialButtonStyle: ButtonStyle {
     var accent = false
     var ghost = false
+    var compact = false   // hugs its label at field height — for buttons beside inputs
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12.5, weight: .semibold))
             .foregroundStyle(ghost ? Dial.textMuted : Dial.textRoot)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
+            .frame(maxWidth: compact ? nil : .infinity)
+            .frame(height: compact ? 33 : nil)
+            .padding(.horizontal, compact ? 14 : 0)
+            .padding(.vertical, compact ? 0 : 9)
             .background(
                 accent ? AnyShapeStyle(LinearGradient(
-                              colors: [Color(red: 1, green: 0.30, blue: 0.44), Dial.accentDeep],
+                              colors: [Color(red: 1.0, green: 0.10, blue: 0.20), Dial.accentDeep],
                               startPoint: .top, endPoint: .bottom))
                        : AnyShapeStyle(Dial.surface),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                in: RoundedRectangle(cornerRadius: compact ? 8 : 9, style: .continuous)
             )
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .overlay(RoundedRectangle(cornerRadius: compact ? 8 : 9, style: .continuous)
                 .stroke(accent ? Color.white.opacity(0.18) : Dial.stroke, lineWidth: 1))
-            .shadow(color: accent ? Dial.accentDeep.opacity(0.3) : .clear, radius: 9, y: 3)
+            .shadow(color: accent && !compact ? Dial.accentDeep.opacity(0.3) : .clear, radius: 9, y: 3)
             .opacity(configuration.isPressed ? 0.75 : 1)
             .foregroundStyle(accent ? .white : (ghost ? Dial.textMuted : Dial.textRoot))
     }
@@ -228,7 +233,7 @@ struct DialFieldStyle: TextFieldStyle {
             .font(.system(size: 12))
             .foregroundStyle(Dial.textRoot)
             .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .frame(height: 33)   // matches compact DialButtonStyle beside it
             .background(Dial.inset, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Dial.stroke, lineWidth: 1))
     }

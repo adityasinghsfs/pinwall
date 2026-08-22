@@ -92,35 +92,106 @@ final class PinterestScraper: NSObject {
     func discoverBoards() async -> [Board] {
         await load(URL(string: "https://www.pinterest.com/")!)
         await sleep(3.0)
-        guard let user = await authState().username, !user.isEmpty else { return [] }
-        await load(URL(string: "https://www.pinterest.com/\(user)/_created/")!)
-        await sleep(3.0)
+        guard let user = await authState().username, !user.isEmpty else {
+            Harvester.log("discoverBoards: no username resolved — treating as logged out")
+            return []
+        }
+        Harvester.log("discoverBoards: user=\(user)")
+
+        // First choice: Pinterest's own BoardsResource API, fetched from inside
+        // the logged-in page (cookies ride along). Gives structured boards with
+        // an archived timestamp (filtered out) sorted by last-pinned — so the
+        // newest boards appear and archived ones don't.
+        let kick = """
+        (function(){
+          window.__pwBoards = null;
+          var u = \(jsString(user));
+          var data = { options: { username: u, field_set_key: 'profile_grid_item',
+                                  sort: 'last_pinned_to', filter_stories: false }, context: {} };
+          fetch('/resource/BoardsResource/get/?source_url=' + encodeURIComponent('/' + u + '/_saved/')
+                + '&data=' + encodeURIComponent(JSON.stringify(data)),
+                { credentials: 'include', headers: { 'Accept': 'application/json',
+                                                     'X-Requested-With': 'XMLHttpRequest' } })
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+              var arr = (j && j.resource_response && j.resource_response.data) || [];
+              window.__pwBoards = arr.map(function(b){
+                return { name: b.name || '', url: b.url || '',
+                         archived: !!b.archived_by_me_at };
+              });
+            })
+            .catch(function(e){ window.__pwBoards = { err: String(e) }; });
+          return 1;
+        })();
+        """
+        _ = await evalJS(kick)
+        for _ in 0..<16 {   // poll up to ~8s for the fetch to land
+            await sleep(0.5)
+            if let arr = await evalJS("window.__pwBoards") as? [[String: Any]] {
+                let boards = arr.compactMap { d -> Board? in
+                    guard let url = d["url"] as? String, !url.isEmpty,
+                          (d["archived"] as? Bool) != true else { return nil }
+                    let name = (d["name"] as? String) ?? ""
+                    let full = url.hasPrefix("/") ? "https://www.pinterest.com" + url : url
+                    return Board(name: name.isEmpty ? full : name, url: full)
+                }
+                if !boards.isEmpty {
+                    Harvester.log("discoverBoards: API found=\(boards.count) (of \(arr.count) incl. archived)")
+                    return boards
+                }
+                break   // API answered but empty — fall back to the DOM scrape
+            }
+            if let e = await evalJS("window.__pwBoards && window.__pwBoards.err") as? String {
+                Harvester.log("discoverBoards: API error \(e) — falling back to DOM")
+                break
+            }
+        }
+
+        // Fallback: scrape the boards tab (/_saved/) + the page's JSON blob.
+        await load(URL(string: "https://www.pinterest.com/\(user)/_saved/")!)
+        await sleep(3.5)
         for _ in 0..<4 { _ = await evalJS("window.scrollTo(0,(window.scrollY||0)+1500);1;"); await sleep(0.8) }
-        // NOTE: select ALL root links and filter by regex — do NOT try to build a
-        // '/user/' attribute selector via string concat inside the JS literal
-        // (the old 'a[href^="/"+u+"/"]' was one literal string → SyntaxError →
-        // zero boards for everyone).
+        // Two extraction passes: anchor links (filtered by regex — never build the
+        // selector by string concat, that broke once before) PLUS the __PWS_DATA__
+        // JSON blob, which contains board URLs even when the grid is virtualised.
         let js = """
         (function(){
-          var re = new RegExp('^/' + \(jsString(user)) + '/([^/]+)/?$');
+          var u = \(jsString(user));
+          var reserved = {pins:1,boards:1,followers:1,following:1,tried:1,_saved:1,_created:1};
           var out = {};
+          function add(slug, name){
+            if (!slug || slug.charAt(0) === '_' || reserved[slug.toLowerCase()]) return;
+            var full = 'https://www.pinterest.com/' + u + '/' + slug + '/';
+            if (!out[full]) out[full] = (name || slug.replace(/[-_]+/g, ' ')).trim();
+          }
+          var re = new RegExp('^/' + u + '/([^/]+)/?$');
           Array.prototype.forEach.call(document.querySelectorAll('a[href^="/"]'), function(a){
-            var href = a.getAttribute('href') || '';
-            var m = href.match(re); if (!m) return;
-            var slug = m[1];
-            if (slug.charAt(0) === '_' || ['pins','boards','followers','following'].indexOf(slug) >= 0) return;
-            var name = (a.getAttribute('aria-label') || a.textContent || slug).trim();
-            var full = 'https://www.pinterest.com' + '/' + \(jsString(user)) + '/' + slug + '/';
-            if (!out[full]) out[full] = name || slug;
+            var m = (a.getAttribute('href') || '').match(re); if (!m) return;
+            add(m[1], (a.getAttribute('aria-label') || a.textContent || '').trim());
           });
+          try {
+            var s = document.getElementById('__PWS_DATA__');
+            if (s) {
+              var rej = new RegExp('"/' + u + '/([a-zA-Z0-9%_\\\\-]+)/"', 'g'), mm;
+              while ((mm = rej.exec(s.textContent)) !== null) {
+                try { add(decodeURIComponent(mm[1]), null); } catch (e) { add(mm[1], null); }
+              }
+            }
+          } catch (e) {}
           return Object.keys(out).map(function(k){ return { url: k, name: out[k] }; });
         })();
         """
-        guard let arr = await evalJS(js) as? [[String: Any]] else { return [] }
-        return arr.compactMap { d in
-            guard let url = d["url"] as? String else { return nil }
-            return Board(name: (d["name"] as? String) ?? url, url: url)
+        guard let arr = await evalJS(js) as? [[String: Any]] else {
+            Harvester.log("discoverBoards: JS returned nothing")
+            return []
         }
+        let boards = arr.compactMap { d -> Board? in
+            guard let url = d["url"] as? String else { return nil }
+            let raw = (d["name"] as? String) ?? url
+            return Board(name: raw.isEmpty ? url : raw.capitalized, url: url)
+        }
+        Harvester.log("discoverBoards: found=\(boards.count)")
+        return boards
     }
 
     private func jsString(_ s: String) -> String {
